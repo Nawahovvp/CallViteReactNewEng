@@ -245,6 +245,12 @@ export function EngDetailsModal({ isOpen, onClose, row, engData }) {
                 }
             });
         });
+        // Sort by หน่วยงาน (unit)
+        results.sort((a, b) => {
+            const unitA = (a["หน่วยงาน"] || "").toString().trim();
+            const unitB = (b["หน่วยงาน"] || "").toString().trim();
+            return unitA.localeCompare(unitB, 'th');
+        });
         return results;
     }, [isOpen, row, engData]);
 
