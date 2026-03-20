@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { fetchAllData } from '../services/api';
 import { processRawData, calculateSummary, getCleanTeamPlant, normalizeMaterial } from '../utils/helpers';
+import { loadAllFromCache, saveAllToCache } from '../services/cacheService';
 
 export function useAppData() {
     const [processedData, setProcessedData] = useState([]);
@@ -18,91 +19,131 @@ export function useAppData() {
     const [statusCallFilter, setStatusCallFilter] = useState('');
     const [gmFilter, setGmFilter] = useState(null); // New state for hierarchical filtering
 
+    const hasCacheLoaded = useRef(false);
+
+    // Process fetched data (shared between cache load and server load)
+    const applyData = useCallback((fetchResult, saveCache = false) => {
+        const {
+            mainData,
+            requestData,
+            poData,
+            prData,
+            mainSapData,
+            vipaData,
+            nawaData,
+            plantStockData,
+            newPartData,
+            projectData,
+            updateData,
+            teamPlantData,
+            engData
+        } = fetchResult;
+
+        const now = new Date();
+        let latestUpdateStr = now.toLocaleString('th-TH');
+
+        if (Array.isArray(updateData) && updateData.length > 0) {
+            const dates = updateData
+                .map(row => row.Date)
+                .filter(d => d)
+                .map(d => {
+                    const parts = d.split('/');
+                    if (parts.length === 3) {
+                        let day = parseInt(parts[0], 10);
+                        let month = parseInt(parts[1], 10) - 1;
+                        let year = parseInt(parts[2], 10);
+                        if (year < 2500) year += 543;
+                        return { original: d, date: new Date(year > 2500 ? year - 543 : year, month, day) };
+                    }
+                    return null;
+                })
+                .filter(item => item && !isNaN(item.date.getTime()));
+
+            if (dates.length > 0) {
+                const maxItem = dates.reduce((max, curr) => curr.date > max.date ? curr : max, dates[0]);
+                latestUpdateStr = maxItem.original;
+            }
+        }
+        setLastUpdated(latestUpdateStr);
+
+        const processed = processRawData(
+            mainData,
+            requestData,
+            poData,
+            prData,
+            mainSapData,
+            vipaData,
+            nawaData,
+            plantStockData,
+            newPartData,
+            projectData,
+            teamPlantData,
+            engData
+        );
+        setProcessedData(processed);
+        setRawSources({ nawaRawData: nawaData, poRawData: poData, prRawData: prData, plantStockData: plantStockData, engData: engData });
+
+        // Save cacheable sources to localStorage for instant load next time
+        if (saveCache) {
+            saveAllToCache({ poData, prData, engData, plantStockData });
+        }
+
+        localStorage.removeItem('app_cached_requestQuantities');
+        localStorage.removeItem('app_cached_requestByPlant');
+    }, []);
+
     const fetchData = useCallback(async (showLoading = true) => {
         if (showLoading) setIsLoading(true);
         setError(null);
         try {
-            const {
-                mainData,
-                requestData,
-                poData,
-                prData,
-                mainSapData,
-                vipaData,
-                nawaData,
-                plantStockData,
-                newPartData,
-                projectData,
-                updateData,
-                teamPlantData,
-                engData
-            } = await fetchAllData();
-
-            const now = new Date();
-            let latestUpdateStr = now.toLocaleString('th-TH');
-
-            if (Array.isArray(updateData) && updateData.length > 0) {
-                // Find the maximum date from the "Date" column
-                const dates = updateData
-                    .map(row => row.Date)
-                    .filter(d => d)
-                    .map(d => {
-                        // Handle date parsing (assuming DD/MM/YYYY or similar)
-                        const parts = d.split('/');
-                        if (parts.length === 3) {
-                            let day = parseInt(parts[0], 10);
-                            let month = parseInt(parts[1], 10) - 1;
-                            let year = parseInt(parts[2], 10);
-                            if (year < 2500) year += 543; // Convert to Buddhist Era if needed, or keep as is.
-                            // However, the original code used th-TH which is BE. 
-                            // Let's assume the sheet has standard dates or strings that we should just find the max of.
-                            // If they are strings like "28/02/2026", we need to parse them to compare.
-                            return { original: d, date: new Date(year > 2500 ? year - 543 : year, month, day) };
-                        }
-                        return null;
-                    })
-                    .filter(item => item && !isNaN(item.date.getTime()));
-
-                if (dates.length > 0) {
-                    const maxItem = dates.reduce((max, curr) => curr.date > max.date ? curr : max, dates[0]);
-                    latestUpdateStr = maxItem.original;
-                }
-            }
-            setLastUpdated(latestUpdateStr);
-
-            const processed = processRawData(
-                mainData,
-                requestData,
-                poData,
-                prData,
-                mainSapData,
-                vipaData,
-                nawaData,
-                plantStockData,
-                newPartData,
-                projectData,
-                teamPlantData,
-                engData
-            );
-            setProcessedData(processed);
-            setRawSources({ nawaRawData: nawaData, poRawData: poData, prRawData: prData, plantStockData: plantStockData, engData: engData });
-
-            // Clear optimistic caches after successful fetch — sheet data is now source of truth
-            localStorage.removeItem('app_cached_requestQuantities');
-            localStorage.removeItem('app_cached_requestByPlant');
+            const result = await fetchAllData();
+            applyData(result, true);
         } catch (err) {
             console.error(err);
             setError('เกิดข้อผิดพลาดในการโหลดข้อมูล');
         } finally {
             if (showLoading) setIsLoading(false);
         }
-    }, []);
+    }, [applyData]);
 
     useEffect(() => {
-        fetchData(true);
+        let cacheHit = false;
+
+        // Phase 1: Try to load from cache first (instant)
+        if (!hasCacheLoaded.current) {
+            hasCacheLoaded.current = true;
+            const cached = loadAllFromCache();
+            const hasCache = cached.poData || cached.prData || cached.engData || cached.plantStockData;
+
+            if (hasCache) {
+                cacheHit = true;
+                console.log('[Cache] Showing cached data instantly while fetching fresh data...');
+                const cachedResult = {
+                    mainData: [],
+                    requestData: [],
+                    poData: cached.poData || [],
+                    prData: cached.prData || [],
+                    mainSapData: [],
+                    vipaData: [],
+                    nawaData: [],
+                    plantStockData: cached.plantStockData || [],
+                    newPartData: [],
+                    projectData: [],
+                    updateData: [],
+                    teamPlantData: [],
+                    engData: cached.engData || []
+                };
+                applyData(cachedResult, false);
+                setIsLoading(false);
+            }
+        }
+
+        // Phase 2: Always fetch fresh data from server
+        // If cache was hit, fetch silently in background; otherwise show loading spinner
+        fetchData(!cacheHit);
         const interval = setInterval(() => fetchData(false), 5 * 60 * 1000);
         return () => clearInterval(interval);
-    }, [fetchData]);
+    }, [fetchData, applyData]);
 
     // --- Filtering Logic (matching original call.js exactly) ---
 
