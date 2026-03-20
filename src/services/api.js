@@ -42,7 +42,7 @@ export const updateUrl = `https://opensheet.elk.sh/${sheetID}/${updateSheetName}
 export const newPartLoadUrl = "https://opensheet.elk.sh/1R8X9yVZBzOc1eDPJU0stKLjVSygMusJihtprdOtb6sE/NewPart";
 export const projectLogLoadUrl = "https://opensheet.elk.sh/1R8X9yVZBzOc1eDPJU0stKLjVSygMusJihtprdOtb6sE/ProjectLog";
 export const newPartSaveUrl = "https://script.google.com/macros/s/AKfycbwRKCZxTrzSiY1CSE54q-GMJYiCiXdrfj_CBXM2yLerGsExJUsH0UrPgiQcSP-btN45/exec";
-export const logAndSyncUrl = "https://script.google.com/macros/s/AKfycbyA5gl4mdz5v1x4atWM51fFlB8-UwiyvhwVsxJ6mMtxFdm7erg5uH92yR0BOnMUtUsp2w/exec";
+export const logAndSyncUrl = "https://script.google.com/macros/s/AKfycbyx8Y6S7iYw95BBd8nHSJArEU_o25mSb7QuF7pxdInbGZOIkDaiQLiaBwHFkHiILQPg/exec";
 export const teamPlantUrl = `https://opensheet.elk.sh/1eqVoLsZxGguEbRCC5rdI4iMVtQ7CK4T3uXRdx8zE3uw/TeamPlant`;
 
 // Plant-specific Eng data sources (Technician stock)
@@ -109,9 +109,9 @@ export async function loginUser(username, password) {
         throw new Error('ไม่พบข้อมูลพนักงานนี้');
     }
 
-    // --- Log successful login to GAS ---
+    // --- Log successful login to GAS (fire-and-forget, no-cors) ---
     try {
-        fetch(logAndSyncUrl, {
+        await fetch(logAndSyncUrl, {
             method: 'POST',
             mode: 'no-cors',
             headers: { 'Content-Type': 'text/plain' },
@@ -123,8 +123,9 @@ export async function loginUser(username, password) {
                 status: 'SUCCESS'
             })
         });
+        console.log("Login log request sent successfully");
     } catch (e) {
-        console.error("Login logging failed:", e);
+        console.warn("Login logging failed (non-critical):", e);
     }
     // ------------------------------------
 

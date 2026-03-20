@@ -107,42 +107,53 @@ export function useAppData() {
     }, [applyData]);
 
     useEffect(() => {
-        let cacheHit = false;
+        let cancelled = false;
 
-        // Phase 1: Try to load from cache first (instant)
-        if (!hasCacheLoaded.current) {
-            hasCacheLoaded.current = true;
-            const cached = loadAllFromCache();
-            const hasCache = cached.poData || cached.prData || cached.engData || cached.plantStockData;
+        const init = async () => {
+            let cacheHit = false;
 
-            if (hasCache) {
-                cacheHit = true;
-                console.log('[Cache] Showing cached data instantly while fetching fresh data...');
-                const cachedResult = {
-                    mainData: [],
-                    requestData: [],
-                    poData: cached.poData || [],
-                    prData: cached.prData || [],
-                    mainSapData: [],
-                    vipaData: [],
-                    nawaData: [],
-                    plantStockData: cached.plantStockData || [],
-                    newPartData: [],
-                    projectData: [],
-                    updateData: [],
-                    teamPlantData: [],
-                    engData: cached.engData || []
-                };
-                applyData(cachedResult, false);
-                setIsLoading(false);
+            // Phase 1: Try to load from IndexedDB cache first (near-instant)
+            if (!hasCacheLoaded.current) {
+                hasCacheLoaded.current = true;
+                try {
+                    const cached = await loadAllFromCache();
+                    const hasCache = cached.poData || cached.prData || cached.engData || cached.plantStockData;
+
+                    if (hasCache && !cancelled) {
+                        cacheHit = true;
+                        console.log('[Cache] Showing cached data instantly while fetching fresh data...');
+                        const cachedResult = {
+                            mainData: [],
+                            requestData: [],
+                            poData: cached.poData || [],
+                            prData: cached.prData || [],
+                            mainSapData: [],
+                            vipaData: [],
+                            nawaData: [],
+                            plantStockData: cached.plantStockData || [],
+                            newPartData: [],
+                            projectData: [],
+                            updateData: [],
+                            teamPlantData: [],
+                            engData: cached.engData || []
+                        };
+                        applyData(cachedResult, false);
+                        setIsLoading(false);
+                    }
+                } catch (e) {
+                    console.warn('[Cache] Cache load failed:', e);
+                }
             }
-        }
 
-        // Phase 2: Always fetch fresh data from server
-        // If cache was hit, fetch silently in background; otherwise show loading spinner
-        fetchData(!cacheHit);
+            // Phase 2: Always fetch fresh data from server
+            if (!cancelled) {
+                fetchData(!cacheHit);
+            }
+        };
+
+        init();
         const interval = setInterval(() => fetchData(false), 5 * 60 * 1000);
-        return () => clearInterval(interval);
+        return () => { cancelled = true; clearInterval(interval); };
     }, [fetchData, applyData]);
 
     // --- Filtering Logic (matching original call.js exactly) ---

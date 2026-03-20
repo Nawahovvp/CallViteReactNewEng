@@ -1,48 +1,76 @@
 /**
- * Cache-first data loading service for Instant Load.
+ * Cache-first data loading service using IndexedDB (handles large datasets).
  * Caches: poData, prData, engData, plantStockData
  */
 
-const CACHE_PREFIX = 'app_cache_';
+const DB_NAME = 'AppDataCache';
+const DB_VERSION = 1;
+const STORE_NAME = 'dataCache';
 const DEFAULT_MAX_AGE = 30 * 60 * 1000; // 30 minutes
 
 export const CACHEABLE_KEYS = ['poData', 'prData', 'engData', 'plantStockData'];
 
-/**
- * Save data to localStorage with a timestamp.
- */
-export function saveToCache(key, data) {
-    try {
-        const entry = {
-            timestamp: Date.now(),
-            data: data
+// --- IndexedDB helpers ---
+
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+            }
         };
-        localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(entry));
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+function idbGet(db, key) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function idbPut(db, key, data) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.put({ key, timestamp: Date.now(), data });
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+    });
+}
+
+// --- Public API ---
+
+/**
+ * Save data to IndexedDB cache with a timestamp.
+ */
+export async function saveToCache(key, data) {
+    try {
+        const db = await openDB();
+        await idbPut(db, key, data);
         console.log(`[Cache] Saved ${key} (${Array.isArray(data) ? data.length + ' items' : 'object'})`);
     } catch (e) {
         console.warn(`[Cache] Failed to save ${key}:`, e);
-        // If localStorage is full, try clearing old caches
-        try {
-            CACHEABLE_KEYS.forEach(k => localStorage.removeItem(CACHE_PREFIX + k));
-            localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ timestamp: Date.now(), data }));
-        } catch (e2) {
-            // Give up silently
-        }
     }
 }
 
 /**
- * Load data from localStorage cache.
+ * Load data from IndexedDB cache.
  * Returns the data or null if not found / expired.
  */
-export function loadFromCache(key, maxAgeMs = DEFAULT_MAX_AGE) {
+export async function loadFromCache(key, maxAgeMs = DEFAULT_MAX_AGE) {
     try {
-        const raw = localStorage.getItem(CACHE_PREFIX + key);
-        if (!raw) return null;
-        const entry = JSON.parse(raw);
+        const db = await openDB();
+        const entry = await idbGet(db, key);
         if (!entry || !entry.data) return null;
 
-        // Check freshness
         const age = Date.now() - (entry.timestamp || 0);
         if (age > maxAgeMs) {
             console.log(`[Cache] ${key} expired (${Math.round(age / 1000)}s old)`);
@@ -59,23 +87,22 @@ export function loadFromCache(key, maxAgeMs = DEFAULT_MAX_AGE) {
 
 /**
  * Load all cacheable data sources at once.
- * Returns an object with keys from CACHEABLE_KEYS, each containing cached data or null.
  */
-export function loadAllFromCache() {
+export async function loadAllFromCache() {
     const result = {};
-    CACHEABLE_KEYS.forEach(key => {
-        result[key] = loadFromCache(key);
-    });
+    for (const key of CACHEABLE_KEYS) {
+        result[key] = await loadFromCache(key);
+    }
     return result;
 }
 
 /**
  * Save all cacheable data sources at once.
  */
-export function saveAllToCache(data) {
-    CACHEABLE_KEYS.forEach(key => {
+export async function saveAllToCache(data) {
+    for (const key of CACHEABLE_KEYS) {
         if (data[key] !== undefined && data[key] !== null) {
-            saveToCache(key, data[key]);
+            await saveToCache(key, data[key]);
         }
-    });
+    }
 }
