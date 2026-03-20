@@ -1,0 +1,964 @@
+// Helper functions for call data processing
+
+export function parseDateString(dateStr) {
+    if (!dateStr) return null;
+    const parts = dateStr.split('/');
+    if (parts.length === 3) {
+        let day = parseInt(parts[0], 10);
+        let month = parseInt(parts[1], 10) - 1;
+        let yearStr = parts[2].split(' ')[0];
+        let year = parseInt(yearStr, 10);
+        if (year < 2000) year += 2000;
+        return new Date(year, month, day);
+    }
+    return null;
+}
+
+export function isValidDate(d) {
+    return d instanceof Date && !isNaN(d);
+}
+
+export function calculateDaysBetween(startDate, endDate) {
+    if (!isValidDate(startDate) || !isValidDate(endDate)) return null;
+    const start = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+    const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+    const diffTime = Math.abs(end - start);
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+export function normalizeMaterial(mat) {
+    if (mat == null) return "";
+    let strMat = typeof mat === 'number' ? Math.trunc(mat).toString() : mat.toString();
+    return strMat.trim().replace(/^'/, '').trim().replace(/\s+/g, '').toUpperCase();
+}
+
+export const PLANT_MAPPING = {
+    "Stock กทม": "0301",
+    "Stock ระยอง": "0369",
+    "Stock วิภาวดี 62": "0326",
+    "Stock ขอนแก่น": "0319",
+    "Stock โคราช": "0309",
+    "Stock เชียงใหม่": "0366",
+    "Stock พระราม 3": "0304",
+    "Stock พิษณุโลก": "0312",
+    "Stock ภูเก็ต": "0313",
+    "Stock ราชบุรี": "0305",
+    "Stock ลำปาง": "0320",
+    "Stock ศรีราชา": "0311",
+    "Stock สุราษฎร์": "0307",
+    "Stock ประเวศ": "0330",
+    "Stock SA ฉะเชิงเทรา": "0367",
+    "Stock SA บางบัวทอง": "0364",
+    "Stock SA ปัตตานี": "0324",
+    "Stock SA ปากเกร็ด": "0363",
+    "Stock SA ร้อยเอ็ด": "0368",
+    "Stock SA ลำลูกกา": "0323",
+    "Stock SA สงขลา": "0303",
+    "Stock SA สมุทรปราการ": "0365",
+    "Stock SA หนองแขม": "0362",
+    "Stock SA อยุธยา": "0315",
+    "Stock SA อุดรธานี1": "0310",
+    "Stock SA อุดรธานี2": "0322",
+    "0326": "SA นนทบุรี"
+};
+
+export const TABLE_COLUMNS = [
+    { key: 'StatusGroup', label: 'StatusCall' },
+    { key: 'DayRepair', label: 'ผ่านมา' },
+    { key: 'DateTime', label: 'วันที่แจ้ง' },
+    { key: 'Brand', label: 'Brand' },
+    { key: 'Call Type', label: 'Call Type' },
+    { key: 'Team', label: 'Team' },
+    { key: 'TeamPlant', label: 'ศูนย์พื้นที่' },
+    { key: 'ค้างหน่วยงาน', label: 'ค้างหน่วยงาน' },
+    { key: 'Ticket Number', label: 'Ticket Number' },
+    { key: 'Material', label: 'Material' },
+    { key: 'Description', label: 'Description' },
+    { key: 'Rebuilt', label: 'ทดแทน' },
+    { key: 'PR', label: 'PR' },
+    { key: 'PO', label: 'PO' },
+    { key: 'Nawa', label: 'นวนคร' },
+    { key: 'Vipa', label: 'วิภาวดี' },
+    { key: 'Request', label: 'นอกรอบ' },
+    { key: 'EngQty', label: 'ช่าง' },
+    { key: 'QtyPlant', label: 'คลังพื้นที่' },
+    { key: 'OtherPlant', label: 'พื้นที่อื่น' },
+    { key: 'PendingStockDays', label: 'ค้างStock' },
+    { key: 'StockStartDate', label: 'แจ้งคลัง' },
+    { key: 'คลังตอบ', label: 'คลังตอบ' },
+    { key: 'StatusCall', label: 'สถานะอะไหล่' },
+    { key: 'วันที่ตอบ', label: 'วันที่ตอบ' },
+    { key: 'UserAns', label: 'ผู้แจ้ง' },
+    { key: 'Answer1', label: 'แจ้งผล' },
+    { key: 'GM', label: 'GM' },
+    { key: 'Division', label: 'ฝ่าย' },
+    { key: 'Department', label: 'แผนก' },
+    { key: 'IDPlant', label: 'IDPlant' },
+];
+
+// Data computations
+function computeRequestQuantities(data) {
+    const result = {};
+    const byPlant = {}; // key: "plantCode_material" -> qty
+    if (!Array.isArray(data)) return { byMaterial: result, byPlant };
+
+    // Threshold: Yesterday at 15:00:00
+    const now = new Date();
+    const threshold = new Date(now);
+    threshold.setDate(now.getDate() - 1);
+    threshold.setHours(15, 0, 0, 0);
+
+    data.forEach(row => {
+        // Parse Timestamp (e.g., "16/03/2569 17:49:42" or "3/17/2026 16:46:47")
+        const tsStr = (row?.Timestamp || row?.timestamp || "").toString().trim();
+        if (!tsStr) return;
+
+        let rowDate = null;
+        // Attempt to parse "D/M/Y H:M:S" or "M/D/Y H:M:S" format
+        const match = tsStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+        if (match) {
+            let [_, p1, p2, originalY, h, min, s] = match.map(Number);
+            let y = originalY;
+            if (y > 2500) y -= 543; // Convert Thai year to AD
+            
+            let d, m;
+            if (p1 > 12) {
+                d = p1; m = p2; // D/M/Y
+            } else if (p2 > 12) {
+                m = p1; d = p2; // M/D/Y
+            } else {
+                // Ambiguous (e.g., 3/10/2026 vs 16/03/2569)
+                if (originalY > 2500) {
+                    d = p1; m = p2; // D/M/Y for Thai
+                } else {
+                    m = p1; d = p2; // M/D/Y for Gregorian (observed in sheet)
+                }
+            }
+            rowDate = new Date(y, m - 1, d, h, min, s);
+        } else {
+            // Fallback to native parsing
+            rowDate = new Date(tsStr);
+        }
+
+        if (!isValidDate(rowDate) || rowDate < threshold) return;
+
+        const material = normalizeMaterial(row?.Material ?? row?.material ?? row?.MaterialCode ?? row?.Mat ?? row?.Item ?? "");
+        const plant = (row?.plant ?? row?.Plant ?? "").toString().trim();
+
+        let qtyRaw = row?.qty ?? row?.Qty ?? row?.QTY ?? row?.Quantity ?? row?.quantity ?? row?.["จำนวน"] ?? row?.["จำนวนที่ขอเบิก"] ?? 0;
+        let qty = 0;
+        if (typeof qtyRaw === 'number') {
+            qty = qtyRaw;
+        } else if (typeof qtyRaw === 'string') {
+            qty = parseFloat(qtyRaw.replace(/,/g, ''));
+        }
+        if (material && !isNaN(qty) && qty > 0) {
+            result[material] = (result[material] || 0) + qty;
+            if (plant) {
+                const plantKey = `${plant}_${material}`;
+                byPlant[plantKey] = (byPlant[plantKey] || 0) + qty;
+            }
+        }
+    });
+
+    // Merge Optimistic Cache (byMaterial)
+    try {
+        const cachedStr = localStorage.getItem('app_cached_requestQuantities');
+        if (cachedStr) {
+            const cached = JSON.parse(cachedStr);
+            Object.keys(cached).forEach(mat => {
+                if (cached[mat] > 0) {
+                    result[mat] = (result[mat] || 0) + cached[mat];
+                }
+            });
+        }
+    } catch (e) { console.warn("Cache parse err", e); }
+
+    // Merge Optimistic Cache (byPlant)
+    try {
+        const plantCacheStr = localStorage.getItem('app_cached_requestByPlant');
+        if (plantCacheStr) {
+            const plantCached = JSON.parse(plantCacheStr);
+            Object.keys(plantCached).forEach(key => {
+                if (plantCached[key] > 0) {
+                    byPlant[key] = (byPlant[key] || 0) + plantCached[key];
+                }
+            });
+        }
+    } catch (e) { console.warn("Plant cache parse err", e); }
+
+    return { byMaterial: result, byPlant };
+}
+
+function computePrQuantities(data) {
+    const result = {};
+    if (!Array.isArray(data)) return result;
+    data.forEach(row => {
+        const material = normalizeMaterial(row["Material"] || "");
+        if (!material) return;
+        const req = parseFloat((row["Quantity requested"] || "0").toString().replace(/,/g, '')) || 0;
+        const ord = parseFloat((row["Quantity ordered"] || "0").toString().replace(/,/g, '')) || 0;
+        const qty = req - ord;
+        if (qty > 0) {
+            result[material] = (result[material] || 0) + qty;
+        }
+    });
+    return result;
+}
+
+function computePoQuantities(data) {
+    const result = {};
+    if (!Array.isArray(data)) return result;
+    data.forEach(row => {
+        const material = normalizeMaterial(row["Material"] || "");
+        if (!material) return;
+        const qtyRaw = row["Still to be delivered (qty)"];
+        const qty = parseFloat((qtyRaw + "").replace(/,/g, ''));
+        if (!isNaN(qty) && qty > 0) {
+            result[material] = (result[material] || 0) + qty;
+        }
+    });
+    return result;
+}
+
+function computeStockQuantities(data) {
+    const result = {};
+    if (!Array.isArray(data)) return result;
+    data.forEach(row => {
+        const material = normalizeMaterial(row["Material"] || "");
+        if (!material) return;
+        const qtyRaw = row["Unrestricted"];
+        const qty = parseFloat((qtyRaw + "").replace(/,/g, ''));
+        if (!isNaN(qty)) {
+            result[material] = qty;
+        }
+    });
+    return result;
+}
+
+function computePlantStockQuantities(data) {
+    const byPlant = {};
+    const byMaterial = {};
+    if (!Array.isArray(data)) return { byPlant, byMaterial };
+    data.forEach(row => {
+        const material = normalizeMaterial(row["Material"] || "");
+        const plant = (row["Plant"] || "").toString().trim();
+        if (!material) return;
+        const qtyRaw = row["Unrestricted"];
+        const qty = parseFloat((qtyRaw + "").replace(/,/g, ''));
+        if (!isNaN(qty)) {
+            if (plant) {
+                const key = `${plant}_${material}`;
+                byPlant[key] = (byPlant[key] || 0) + qty;
+            }
+            byMaterial[material] = (byMaterial[material] || 0) + qty;
+        }
+    });
+    return { byPlant, byMaterial };
+}
+
+function computeEngQuantities(engDataList) {
+    const byPlant = {};
+    if (!Array.isArray(engDataList)) return byPlant;
+    
+    engDataList.forEach(item => {
+        const plant = item.plant;
+        const data = item.data;
+        if (!Array.isArray(data)) return;
+        
+        data.forEach(row => {
+            const material = normalizeMaterial(row["Material"] || "");
+            if (!material) return;
+            
+            const qtyRaw = row["จำนวน"] || row["Qty"] || 0;
+            const qty = parseFloat((qtyRaw + "").replace(/,/g, ''));
+            const team = (row["หน่วยงาน"] || row["Team"] || "").toString().trim();
+
+            if (!isNaN(qty) && qty > 0) {
+                const key = `${plant}_${material}`;
+                if (!byPlant[key]) {
+                    byPlant[key] = { qty: 0, teams: new Set() };
+                }
+                byPlant[key].qty += qty;
+                if (team) {
+                    byPlant[key].teams.add(team);
+                }
+            }
+        });
+    });
+    
+    return byPlant;
+}
+
+// Logic to process raw data and merge with new limits/projects
+export function calculateStockPendingInfo(row) {
+    const pendingUnit = row["ค้างหน่วยงาน"] || "";
+    if (!pendingUnit.toLowerCase().includes("stock")) {
+        return { days: "0", date: "-" };
+    }
+
+    const timelineText = row["TimeLine"];
+    if (!timelineText) return { days: "0", date: "-" };
+
+    const events = timelineText.split('|');
+    let startStockDateObj = null;
+    let displayDateStr = "-";
+
+    for (let i = events.length - 1; i >= 0; i--) {
+        let eventTrim = events[i].trim();
+        if (!eventTrim) continue;
+
+        const statusMatch = eventTrim.match(/^(\d{2}\.\d{2})\s+.*แจ้งค้าง_/i);
+        if (statusMatch) {
+            if (eventTrim.toLowerCase().includes("แจ้งค้าง_stock")) {
+                let dateStr = statusMatch[1];
+                const [day, month] = dateStr.split('.').map(Number);
+                if (day && month) {
+                    const today = new Date();
+                    let year = today.getFullYear();
+                    let tempDate = new Date(year, month - 1, day);
+
+                    if (tempDate.getTime() > today.getTime() + (180 * 24 * 60 * 60 * 1000)) {
+                        year--;
+                        tempDate = new Date(year, month - 1, day);
+                    }
+                    startStockDateObj = tempDate;
+                    displayDateStr = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+                }
+            } else {
+                if (startStockDateObj) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (startStockDateObj) {
+        const today = new Date();
+        startStockDateObj.setHours(0, 0, 0, 0);
+        today.setHours(0, 0, 0, 0);
+        const diffTime = Math.max(0, today.getTime() - startStockDateObj.getTime());
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        return { days: diffDays.toString(), date: displayDateStr };
+    }
+    return { days: "0", date: "-" };
+}
+
+export function processRawData(
+    mainData,
+    requestData,
+    poData,
+    prData,
+    mainSapData,
+    vipaData,
+    nawaData,
+    plantStockData,
+    newPartData,
+    projectData,
+    teamPlantData,
+    engData
+) {
+    // 1. Precalculate dictionaries
+    const { byMaterial: reqQ, byPlant: reqByPlant } = computeRequestQuantities(requestData);
+    const prQ = computePrQuantities(prData);
+    const poQ = computePoQuantities(poData);
+    const vipaStock = computeStockQuantities(vipaData);
+    const nawaStock = computeStockQuantities(nawaData);
+    const { byPlant: plantStock, byMaterial: otherPlantStock } = computePlantStockQuantities(plantStockData);
+    const engByPlant = computeEngQuantities(engData);
+
+    const mainSapMap = new Map();
+    if (Array.isArray(mainSapData)) {
+        mainSapData.forEach(r => {
+            const mat = normalizeMaterial(r["Material"]);
+            if (mat) mainSapMap.set(mat, r);
+        });
+    }
+
+    const newPartMap = new Map();
+    if (Array.isArray(newPartData)) {
+        newPartData.forEach(p => {
+            const tNum = String(p["Ticket Number"] || "").replace(/^'/, '').trim();
+            const mat = String(p["Material"] || "").replace(/^'/, '').trim();
+            const key = `${tNum}_${mat}`;
+            const existing = newPartMap.get(key);
+            if (!existing || new Date(p.Timestamp) > new Date(existing.Timestamp)) {
+                newPartMap.set(key, {
+                    Status: (p["Status"] || p.StatusCall || "").toString().trim(),
+                    Timestamp: p.Timestamp
+                });
+            }
+        });
+    }
+
+    const teamDetailsMap = new Map();
+    if (Array.isArray(teamPlantData)) {
+        teamPlantData.forEach(t => {
+            const teamName = String(t.Team || "").trim();
+            if (teamName) {
+                teamDetailsMap.set(teamName, {
+                    gm: t.GM || "-",
+                    division: t["ฝ่าย"] || "-",
+                    department: t["แผนก"] || "-"
+                });
+            }
+        });
+    }
+
+    const projectMap = new Map();
+    if (Array.isArray(projectData)) {
+        projectData.forEach(p => {
+            const tNum = String(p["Ticket Number"] || "").replace(/^'/, '').trim();
+            if (!projectMap.has(tNum) || new Date(p.Timestamp) > new Date(projectMap.get(tNum).Timestamp)) {
+                projectMap.set(tNum, {
+                    project: (p["Project"] || "").toString().trim(),
+                    statusCall: (p["StatusCall"] || "").toString().trim()
+                });
+            }
+        });
+    }
+
+    // 2. Iterate, mutate, attach values
+    const enrichedData = mainData.map(row => {
+        let r = { ...row, id: row['Ticket Number'] + '_' + row['Material'] };
+        const mat = normalizeMaterial(r["Material"]);
+        const tNum = String(r["Ticket Number"]).replace(/^'/, '').trim();
+
+        // Stock attachments
+        r["Vipa"] = vipaStock[mat] !== undefined ? vipaStock[mat] : "";
+        if (r["Vipa"] === 0 || r["Vipa"] === "0") r["Vipa"] = "";
+
+        // Nawa (นวนคร): Stock quantity from SAP
+        r["Nawa"] = nawaStock[mat] !== undefined ? nawaStock[mat] : "";
+        if (r["Nawa"] === 0 || r["Nawa"] === "0") r["Nawa"] = "";
+
+        const reqQty = reqQ[mat];
+
+        r["PO"] = poQ[mat] !== undefined ? poQ[mat] : "-";
+        r["PR"] = prQ[mat] !== undefined ? prQ[mat] : "";
+
+        // Request (นอกรอบ): Only show when IDPlant matches the plant from request data
+        const rowIdPlant = PLANT_MAPPING[(r["ค้างหน่วยงาน"] || "").toString().trim()] || "";
+        if (rowIdPlant && mat) {
+            const plantReqKey = `${rowIdPlant}_${mat}`;
+            const plantReqQty = reqByPlant[plantReqKey];
+            r["Request"] = (plantReqQty !== undefined && plantReqQty > 0) ? plantReqQty : "";
+        } else {
+            r["Request"] = reqQty !== undefined ? reqQty : "";
+        }
+
+        // Plant Stock attachment
+        let teamPlant = r["ศูนย์พื้นที่"] || r["TeamPlant"];
+        let plantCode = null;
+        if (teamPlant) {
+            const tp = teamPlant.toString().trim();
+            plantCode = PLANT_MAPPING[tp] || PLANT_MAPPING[`Stock ${tp}`] || PLANT_MAPPING[tp.replace(/^Stock\s+/i, '')];
+        }
+
+        // Store IDPlant for display (lookup from ค้างหน่วยงาน which has "Stock xxx" values matching PLANT_MAPPING)
+        const pendingUnit = (r["ค้างหน่วยงาน"] || "").toString().trim();
+        r["IDPlant"] = PLANT_MAPPING[pendingUnit] || "";
+
+        if (plantCode) {
+            let qty;
+            if (plantCode === "0326") {
+                qty = vipaStock[mat];
+            } else if (plantCode === "0301") {
+                qty = nawaStock[mat];
+            } else {
+                const pKey = `${plantCode}_${mat}`;
+                qty = plantStock[pKey];
+            }
+            r["QtyPlant"] = qty !== undefined && qty > 0 ? qty : "";
+
+            const eKey = `${plantCode}_${mat}`;
+            const engInfo = engByPlant[eKey];
+            if (engInfo && engInfo.qty > 0) {
+                r["EngQty"] = engInfo.qty;
+                const rowTeam = (r["Team"] || "").toString().trim();
+                r["hasMatchingEngTeam"] = rowTeam && engInfo.teams.has(rowTeam);
+            } else {
+                r["EngQty"] = "";
+                r["hasMatchingEngTeam"] = false;
+            }
+        } else {
+            r["QtyPlant"] = "";
+            r["EngQty"] = "";
+        }
+
+        // OtherPlant
+        const otherQty = otherPlantStock[mat];
+        r["OtherPlant"] = otherQty !== undefined && otherQty > 0 ? otherQty : "";
+
+        // Rebuilt
+        r["Rebuilt"] = "";
+        if (mainSapMap.has(mat)) {
+            let val = mainSapMap.get(mat)["Rebuilt"];
+            if (val !== undefined && val !== null) {
+                val = String(val).trim();
+                if (val !== "" && val !== "-" && val !== "0") {
+                    r["Rebuilt"] = val;
+                }
+            }
+        }
+
+        // Default StatusX derivation is now handled together with StatusCall in the group loop
+        // to maintain exact parity with call.js calculateTicketStatus where the ticket group dictates
+        // the baseline status, but StatusX can be overridden individually.
+        // We will assign a temporary fallback here, and resolve it properly below.
+        r.TempStatusX = "รอของเข้า";
+        const hasNoMaterial = !mat || mat === "-" || mat === "";
+        if (hasNoMaterial) {
+            r.TempStatusX = "ขอซื้อขอซ่อม";
+        } else {
+            const hasQtyPlant = r["QtyPlant"] && r["QtyPlant"] !== "" && r["QtyPlant"] !== "0";
+            if (hasQtyPlant) {
+                r.TempStatusX = "ระหว่างขนส่ง";
+            } else {
+                const hasNawa = r["Nawa"] && r["Nawa"] !== "" && r["Nawa"] !== "0";
+                if (hasNawa) {
+                    r.TempStatusX = "เบิกนวนคร";
+                } else {
+                    const hasVipa = r["Vipa"] && r["Vipa"] !== "" && r["Vipa"] !== "0";
+                    if (hasVipa) {
+                        r.TempStatusX = "เบิกวิภาวดี";
+                    }
+                }
+            }
+        }
+        r.StatusX = r.TempStatusX;
+
+        // Pending Stock Days
+        const stockPendingInfo = calculateStockPendingInfo(r);
+        r["PendingStockDays"] = stockPendingInfo.days;
+        r["StockStartDate"] = stockPendingInfo.date;
+
+        // Clean values
+        r['TeamPlant'] = r['TeamPlant'] || 'ไม่ระบุ';
+        r['ค้างหน่วยงาน'] = r['ค้างหน่วยงาน'] || 'ไม่ระบุ';
+        r['คลังตอบ'] = r['คลังตอบ'] || 'ไม่ระบุ';
+
+        // Map Team Details
+        const teamName = String(r.Team || "").trim();
+        const details = teamDetailsMap.get(teamName);
+        r.GM = details ? details.gm : "-";
+        r.Division = details ? details.division : "-";
+        r.Department = details ? details.department : "-";
+
+        return r;
+    });
+
+    // 3. Group by Ticket and resolve StatusCall
+    const ticketGroups = {};
+    enrichedData.forEach(r => {
+        const ticket = r["Ticket Number"];
+        if (!ticket) return;
+        if (!ticketGroups[ticket]) ticketGroups[ticket] = [];
+        ticketGroups[ticket].push(r);
+    });
+
+    Object.keys(ticketGroups).forEach(ticket => {
+        const rows = ticketGroups[ticket];
+        let statusCall = "รอของเข้า";
+
+        const HIGH_PRIORITY_STATUSES = ["เบิกนวนคร", "เบิกวิภาวดี", "ระหว่างขนส่ง"];
+
+        // Define priorities and calculate StatusCall
+        const rowStatuses = rows.map(r => {
+            if (HIGH_PRIORITY_STATUSES.includes(r.StatusX)) {
+                return r.StatusX;
+            }
+            const mat = normalizeMaterial(r["Material"]);
+            const key = `${ticket}_${mat}`;
+            const overridenStatusObj = newPartMap.get(key);
+            const overridenStatus = overridenStatusObj ? overridenStatusObj.Status : null;
+            return overridenStatus || r.StatusX || "";
+        });
+
+        const validStatuses = rowStatuses.filter(s => s !== "แจ้งCodeผิด");
+        const statusesToEval = validStatuses.length > 0 ? validStatuses : rowStatuses;
+
+        const hasHighPriority = rows.some(r => HIGH_PRIORITY_STATUSES.includes(r.StatusX));
+
+        if (projectMap.has(ticket) && !hasHighPriority) {
+            const proj = projectMap.get(ticket);
+            if (proj.statusCall) {
+                statusCall = proj.statusCall === "Project" ? "SPACIAL" : proj.statusCall;
+                rows.forEach(r => r._isManualStatusCall = true);
+            }
+            if (proj.project) {
+                rows.forEach(r => {
+                    r['Answer1'] = proj.project;
+                    r._isManualProject = true;
+                });
+            }
+        } else if (statusesToEval.includes("เปิดรหัสใหม่")) {
+            statusCall = "เปิดรหัสใหม่";
+        } else if (statusesToEval.includes("ขอซื้อขอซ่อม")) {
+            statusCall = "ขอซื้อขอซ่อม";
+        } else if (statusesToEval.includes("รอของเข้า")) {
+            statusCall = "รอของเข้า";
+        } else if (statusesToEval.some(s => s === "เบิกนวนคร" || s === "เบิกวิภาวดี")) {
+            statusCall = "เบิกศูนย์อะไหล่";
+        } else if (statusesToEval.includes("ระหว่างขนส่ง")) {
+            statusCall = "ระหว่างขนส่ง";
+        } else if (rowStatuses.includes("แจ้งCodeผิด")) {
+            statusCall = "แจ้งCodeผิด";
+        }
+
+        // Exceed Leadtime check for group status (exclude 'แจ้งCodeผิด')
+        if (statusCall === "รอของเข้า" || statusCall === "ดึงจากคลังอื่น") {
+            const hasExceedLeadTime = rows.some(r => {
+                const mat = normalizeMaterial(r["Material"]);
+                const key = `${ticket}_${mat}`;
+                const overridenStatusObj = newPartMap.get(key);
+                const overridenStatus = overridenStatusObj ? overridenStatusObj.Status : null;
+                const effectiveStatus = overridenStatus || r.StatusX || "";
+
+                if (effectiveStatus === "แจ้งCodeผิด") return false;
+
+                const nawaEmpty = !r["Nawa"] || r["Nawa"] === "-" || r["Nawa"] === "0" || String(r["Nawa"]).trim() === "";
+                if (!nawaEmpty) return false;
+
+                if (!mat || !Array.isArray(poData)) return false;
+
+                const poDetails = poData.filter(poRow => {
+                    const poMat = normalizeMaterial(poRow["Material"] || "");
+                    const qty = parseFloat((poRow["Still to be delivered (qty)"] + "").replace(/,/g, ''));
+                    return poMat === mat && !isNaN(qty) && qty > 0;
+                });
+
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+
+                return poDetails.some(poRow => {
+                    const dateStr = poRow["Document Date"] || poRow["Date"] || poRow["Delivery Date"] || poRow["Deliv.Date"] || "-";
+                    const d = parseDateString(dateStr);
+                    if (d && d instanceof Date && !isNaN(d)) {
+                        d.setHours(0, 0, 0, 0);
+                        return d < today;
+                    }
+                    return false;
+                });
+            });
+
+            if (hasExceedLeadTime) {
+                statusCall = "เกินLeadtime";
+            }
+        }
+
+        // Group status fallback to newPartMap is no longer needed as it's handled in statusesToEval
+
+        rows.forEach(r => {
+            r.StatusCall = statusCall; // Apply group status
+
+            // INDIVIDUAL ITEM OVERRIDE: Re-evaluate leadtime specifically for THIS material
+            if (r.StatusCall === "รอของเข้า" || r.StatusCall === "เกินLeadtime") {
+                const nawaVal = r["Nawa"];
+                const nawaEmpty = !nawaVal || nawaVal === "-" || nawaVal === "0" || String(nawaVal).trim() === "";
+
+                let itemStatus = "รอของเข้า";
+                const op = r["OtherPlant"];
+                if (op !== undefined && op !== null && op !== "" && op !== "-" && op !== 0 && op !== "0") {
+                    itemStatus = "ดึงจากคลังอื่น";
+                }
+
+                if (nawaEmpty) {
+                    const mat = normalizeMaterial(r["Material"]);
+                    if (mat && Array.isArray(poData)) {
+                        const poDetails = poData.filter(poRow => {
+                            const poMat = normalizeMaterial(poRow["Material"] || "");
+                            const qty = parseFloat((poRow["Still to be delivered (qty)"] + "").replace(/,/g, ''));
+                            return poMat === mat && !isNaN(qty) && qty > 0;
+                        });
+
+                        if (poDetails.length > 0) {
+                            const today = new Date();
+                            today.setHours(0, 0, 0, 0);
+                            const isOverdue = poDetails.some(poRow => {
+                                const dateStr = poRow["Document Date"] || poRow["Date"] || poRow["Delivery Date"] || poRow["Deliv.Date"] || "-";
+                                const d = parseDateString(dateStr);
+                                if (d && d instanceof Date && !isNaN(d)) {
+                                    d.setHours(0, 0, 0, 0);
+                                    return d < today;
+                                }
+                                return false;
+                            });
+                            // เกินLeadtime overrrides ดึงจากคลังอื่น
+                            if (isOverdue) itemStatus = "เกินLeadtime";
+                        }
+                    }
+                }
+                r.StatusX = itemStatus;
+            }
+
+            // Override with custom status if it exists for this specific row (Ticket + Material)
+            const mat = normalizeMaterial(r["Material"]);
+            const compositeKey = `${ticket}_${mat}`;
+            if (newPartMap.has(compositeKey) && !HIGH_PRIORITY_STATUSES.includes(r.StatusX)) {
+                const customStatus = newPartMap.get(compositeKey).Status;
+                // DO NOT override StatusCall here, as it should remain the group-level status
+                r.StatusX = customStatus;    // Override StatusX so filtering/sorting works
+                r._isManualStatusX = true;   // Flag as manual override
+            }
+        });
+
+        // Post-processing group check: If ALL items are "ดึงจากคลังอื่น" (excluding 'แจ้งCodeผิด'), then group StatusCall = "ดึงจากคลังอื่น"
+        const evaluableRows = rows.filter(r => {
+            const mat = normalizeMaterial(r["Material"]);
+            const key = `${ticket}_${mat}`;
+            const overridenStatusObj = newPartMap.get(key);
+            const overridenStatus = overridenStatusObj ? overridenStatusObj.Status : null;
+            const effectiveStatus = overridenStatus || r.StatusX || "";
+            return effectiveStatus !== "แจ้งCodeผิด";
+        });
+        const allItemsAreOtherPlant = evaluableRows.length > 0 && evaluableRows.every(r => r.StatusX === "ดึงจากคลังอื่น");
+        if (allItemsAreOtherPlant) {
+            rows.forEach(r => r.StatusCall = "ดึงจากคลังอื่น");
+        }
+    });
+
+    // 4. Group mapping status
+    enrichedData.forEach(r => {
+        let groupStatus = "รอของเข้า";
+        const groupKey = r.StatusCall;
+
+        switch (groupKey) {
+            case "เกินLeadtime": groupStatus = "เกินLeadtime"; break;
+            case "ขอดึงคลังอื่น":
+            case "ดึงจากคลังอื่น": groupStatus = "ดึงจากคลังอื่น"; break;
+            case "ระหว่างขนส่ง": groupStatus = "ระหว่างขนส่ง (ส่งสำเร็จ)"; break;
+            case "เบิกศูนย์อะไหล่": groupStatus = "เบิกศูนย์อะไหล่"; break;
+            case "SPACIAL":
+            case "รอทดแทน": groupStatus = "SPACIAL"; break;
+            case "ขอซื้อขอซ่อม": groupStatus = "ขอซื้อขอซ่อม"; break;
+            case "แจ้งCodeผิด": groupStatus = "แจ้งCodeผิด"; break;
+            case "เปิดรหัสใหม่": groupStatus = "เปิดรหัสใหม่"; break;
+            default: groupStatus = "รอของเข้า";
+        }
+        r.StatusGroup = groupStatus;
+    });
+
+    return enrichedData;
+}
+
+export function calculateSummary(processedData) {
+    const ticketGroups = {};
+    processedData.forEach(row => {
+        const ticket = row["Ticket Number"];
+        if (!ticket) return;
+        if (!ticketGroups[ticket]) ticketGroups[ticket] = [];
+        ticketGroups[ticket].push(row);
+    });
+
+    let stats = {
+        total: Object.keys(ticketGroups).length,
+        exceedLeadtime: 0,
+        pending: 0,
+        otherPlant: 0,
+        success: 0,
+        nawaVipa: 0,
+        spacial: 0,
+        request: 0,
+        newPart: 0,
+        over7: 0,
+        waitingResponse: 0,
+        maxPendingUnit: "-",
+        maxPendingCount: 0,
+        gmStats: [],
+        callTypeStats: []
+    };
+
+    const pendingUnitTicketCounts = {};
+    const gmTicketCounts = {};
+    const callTypeTicketCounts = {};
+
+    Object.keys(ticketGroups).forEach(ticket => {
+        const rows = ticketGroups[ticket];
+        const groupStatus = rows[0].StatusGroup || "รอของเข้า";
+
+        if (groupStatus === 'เกินLeadtime') stats.exceedLeadtime++;
+        if (groupStatus === 'รอของเข้า') stats.pending++;
+        if (groupStatus === 'ดึงจากคลังอื่น') stats.otherPlant++;
+        if (groupStatus === 'ระหว่างขนส่ง (ส่งสำเร็จ)') stats.success++;
+        if (groupStatus === 'เบิกศูนย์อะไหล่') stats.nawaVipa++;
+        if (groupStatus === 'SPACIAL') stats.spacial++;
+        if (groupStatus === 'ขอซื้อขอซ่อม') stats.request++;
+        if (groupStatus === 'เปิดรหัสใหม่') stats.newPart++;
+
+        if (rows.some(r => r['คลังตอบ'] === 'รอตรวจสอบ')) {
+            stats.waitingResponse++;
+        }
+
+        if (rows.some(r => (parseFloat(r['DayRepair']) || 0) > 7)) {
+            stats.over7++;
+        }
+
+        // Aggregate ALL tickets for each unit to find the top unit
+        rows.forEach(r => {
+            const pendingUnit = r["ค้างหน่วยงาน"] || "ไม่ระบุ";
+            if (pendingUnit !== "ไม่ระบุ") {
+                if (!pendingUnitTicketCounts[pendingUnit]) pendingUnitTicketCounts[pendingUnit] = new Set();
+                pendingUnitTicketCounts[pendingUnit].add(ticket);
+            }
+
+            const gm = r.GM || "-";
+            if (!gmTicketCounts[gm]) gmTicketCounts[gm] = new Set();
+            gmTicketCounts[gm].add(ticket);
+
+            const callType = r["Call Type"] || "ไม่ระบุ";
+            if (!callTypeTicketCounts[callType]) callTypeTicketCounts[callType] = new Set();
+            callTypeTicketCounts[callType].add(ticket);
+        });
+    });
+
+    const pendingUnitCounts = {};
+    for (const [unit, set] of Object.entries(pendingUnitTicketCounts)) {
+        pendingUnitCounts[unit] = set.size;
+    }
+
+    let maxCount = 0;
+    let maxUnit = "-";
+    for (const [unit, count] of Object.entries(pendingUnitCounts)) {
+        if (count > maxCount) {
+            maxCount = count;
+            maxUnit = unit;
+        }
+    }
+    stats.maxPendingUnit = maxUnit;
+    stats.maxPendingCount = maxCount;
+
+    // Convert sets to stats arrays
+    const totalTickets = stats.total;
+    const formatStats = (countsMap) => {
+        const stats = Object.entries(countsMap).map(([label, set]) => ({
+            label,
+            value: set.size,
+            percent: totalTickets > 0 ? (set.size / totalTickets * 100).toFixed(0) : 0
+        }));
+
+        // Grouping logic: "Name" and "Name_SA" should stay together
+        const groupMaxMap = {};
+        stats.forEach(item => {
+            const base = item.label.replace(/(_SA|\s_SA)$/i, '').trim();
+            groupMaxMap[base] = Math.max(groupMaxMap[base] || 0, item.value);
+        });
+
+        return stats.sort((a, b) => {
+            const baseA = a.label.replace(/(_SA|\s_SA)$/i, '').trim();
+            const baseB = b.label.replace(/(_SA|\s_SA)$/i, '').trim();
+
+            // 1. Sort by the maximum value found in the group (DESC)
+            if (groupMaxMap[baseB] !== groupMaxMap[baseA]) {
+                return groupMaxMap[baseB] - groupMaxMap[baseA];
+            }
+
+            // 2. Tie-break: Sort by base name alphabetically (ASC)
+            if (baseA !== baseB) {
+                return baseA.localeCompare(baseB, 'th');
+            }
+
+            // 3. Within same base group: Prioritize label WITHOUT _SA first
+            const isSaA = /(_SA|\s_SA)$/i.test(a.label);
+            const isSaB = /(_SA|\s_SA)$/i.test(b.label);
+            if (isSaA !== isSaB) {
+                return isSaA ? 1 : -1; // Normal first, SA second
+            }
+
+            // 4. Then sort by value (DESC)
+            if (b.value !== a.value) {
+                return b.value - a.value;
+            }
+
+            // 5. Finally alphabetical label
+            return a.label.localeCompare(b.label, 'th');
+        });
+    };
+
+    stats.gmStats = formatStats(gmTicketCounts);
+    stats.callTypeStats = formatStats(callTypeTicketCounts);
+
+    const calcPercent = (val) => stats.total > 0 ? Math.round((val / stats.total) * 100) + '%' : '0%';
+
+    stats.exceedLeadtimePercent = calcPercent(stats.exceedLeadtime);
+    stats.pendingPercent = calcPercent(stats.pending);
+    stats.otherPlantPercent = calcPercent(stats.otherPlant);
+    stats.successPercent = calcPercent(stats.success);
+    stats.nawaVipaPercent = calcPercent(stats.nawaVipa);
+    stats.spacialPercent = calcPercent(stats.spacial);
+    stats.requestPercent = calcPercent(stats.request);
+    stats.newPartPercent = calcPercent(stats.newPart);
+    stats.over7Percent = calcPercent(stats.over7);
+    stats.waitingResponsePercent = calcPercent(stats.waitingResponse);
+
+    return stats;
+}
+
+export function extractFilters(data) {
+    const filters = {
+        teamPlant: {},
+        pendingUnit: {},
+        stockAnswer: {},
+        statusCall: {}
+    };
+
+    data.forEach(row => {
+        const tp = row['TeamPlant'] || 'ไม่ระบุ';
+        const pu = row['ค้างหน่วยงาน'] || 'ไม่ระบุ';
+        const sa = row['คลังตอบ'] || 'ไม่ระบุ';
+        const sc = row['StatusCall'] || 'ไม่ระบุ';
+
+        filters.teamPlant[tp] = (filters.teamPlant[tp] || 0) + 1;
+        filters.pendingUnit[pu] = (filters.pendingUnit[pu] || 0) + 1;
+        filters.stockAnswer[sa] = (filters.stockAnswer[sa] || 0) + 1;
+        filters.statusCall[sc] = (filters.statusCall[sc] || 0) + 1;
+    });
+
+    return filters;
+}
+
+export function getCleanTeamPlant(tp) {
+    return (tp || "").replace(/Stock\s*/gi, '').trim();
+}
+
+export function getDesc(row) {
+    return row["Description"] || row["Discription"] || row["Desc"] || "";
+}
+
+
+export function exportToCSV(data, filename = 'Call_Export.csv') {
+    if (!data || data.length === 0) return;
+
+    // Use standardized columns for the export
+    const headers = TABLE_COLUMNS.map(col => col.label);
+    const keys = TABLE_COLUMNS.map(col => col.key);
+
+    const csvRows = [];
+    // Helper to escape values and wrap in quotes
+    const escapeCsv = (val) => {
+        const str = (val === undefined || val === null ? '' : '' + val).trim();
+        return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    csvRows.push(headers.map(escapeCsv).join(','));
+
+    data.forEach(row => {
+        const values = keys.map(key => escapeCsv(row[key]));
+        csvRows.push(values.join(','));
+    });
+
+    const csvString = csvRows.join('\r\n'); // Use Windows newline for Excel compatibility
+    // Add UTF-8 BOM for Thai character support in Excel
+    const blob = new Blob(['\ufeff' + csvString], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+
+    if (link.download !== undefined) {
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+}

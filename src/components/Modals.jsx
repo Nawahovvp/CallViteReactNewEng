@@ -1,0 +1,1409 @@
+import React, { useEffect, useRef, useMemo, useState } from 'react';
+import { Chart, registerables } from 'chart.js';
+import { getCleanTeamPlant, getDesc, normalizeMaterial } from '../utils/helpers';
+
+Chart.register(...registerables);
+
+// ===== Detail Modal =====
+export function DetailModal({ isOpen, onClose, content }) {
+    if (!isOpen) return null;
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content">
+                <span className="close" onClick={onClose}>×</span>
+                <h2>รายละเอียด</h2>
+                <div dangerouslySetInnerHTML={{ __html: content }}></div>
+            </div>
+        </div>
+    );
+}
+
+// ===== Graph Modal (Stacked Bar Chart) =====
+const CHART_COLORS = {
+    "รอของเข้า": '#dc3545',
+    "สำเร็จ": '#28a745',
+    "ระหว่างขนส่ง": '#28a745',
+    "เบิกศูนย์อะไหล่": '#6f42c1',
+    "ขอซื้อขอซ่อม": '#20c997',
+    "เกินLeadtime": '#fd7e14',
+    "ดึงจากคลังอื่น": '#17a2b8',
+    "เปิดรหัสใหม่": '#007bff',
+    "แจ้งCodeผิด": '#e83e8c',
+    "รอทดแทน": '#ffc107',
+    "SPACIAL": '#343a40',
+    "ไม่ระบุ": '#6c757d'
+};
+
+function hexToRgb(hex) {
+    if (!hex || hex.startsWith('var')) return null;
+    hex = hex.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    return `${r}, ${g}, ${b}`;
+}
+
+export function GraphModal({ isOpen, onClose, data = [], onFilterPendingUnit }) {
+    const canvasRef = useRef(null);
+    const chartRef = useRef(null);
+
+    useEffect(() => {
+        if (!isOpen || !canvasRef.current || data.length === 0) return;
+
+        // Pivot: ค้างหน่วยงาน × StatusCall
+        const pivotData = {};
+        const ticketCounted = {};
+        const statusSet = new Set();
+
+        data.forEach(row => {
+            const ticket = row["Ticket Number"];
+            if (ticketCounted[ticket]) return;
+            ticketCounted[ticket] = true;
+            const unit = (row["ค้างหน่วยงาน"] || "ไม่ระบุ").toString().trim();
+            const status = row["StatusCall"] || "ไม่ระบุ";
+            statusSet.add(status);
+            if (!pivotData[unit]) pivotData[unit] = {};
+            pivotData[unit][status] = (pivotData[unit][status] || 0) + 1;
+        });
+
+        const statusCalls = [...statusSet].sort();
+        let pendingUnits = Object.keys(pivotData);
+
+        // Sort by total descending
+        pendingUnits.sort((a, b) => {
+            const totalA = statusCalls.reduce((s, st) => s + (pivotData[a]?.[st] || 0), 0);
+            const totalB = statusCalls.reduce((s, st) => s + (pivotData[b]?.[st] || 0), 0);
+            return totalB - totalA;
+        });
+
+        if (pendingUnits.length > 200) pendingUnits = pendingUnits.slice(0, 200);
+
+        const datasets = statusCalls
+            .filter(st => st !== "ไม่ระบุ" && pendingUnits.some(u => (pivotData[u]?.[st] || 0) > 0))
+            .map(status => {
+                const colorKey = status === "สำเร็จ" ? "ระหว่างขนส่ง" : status;
+                const rgb = hexToRgb(CHART_COLORS[colorKey] || '#6c757d');
+                return {
+                    label: status === "สำเร็จ" ? "ระหว่างขนส่ง" : status,
+                    data: pendingUnits.map(u => pivotData[u]?.[status] || 0),
+                    borderColor: CHART_COLORS[colorKey] || '#6c757d',
+                    backgroundColor: rgb ? `rgba(${rgb}, 0.8)` : '#6c757d',
+                    borderWidth: 2,
+                    borderRadius: 4,
+                    stack: 'CallStack'
+                };
+            });
+
+        if (chartRef.current) chartRef.current.destroy();
+
+        const ctx = canvasRef.current.getContext('2d');
+        chartRef.current = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: pendingUnits, datasets },
+            options: {
+                responsive: true,
+                interaction: { intersect: false, mode: 'index' },
+                animation: { duration: 2000, easing: 'easeOutQuart' },
+                scales: {
+                    x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45 }, grid: { display: false } },
+                    y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1 } }
+                },
+                onClick: (event, elements) => {
+                    if (elements.length > 0 && onFilterPendingUnit) {
+                        const idx = elements[0].index;
+                        const unit = pendingUnits[idx];
+                        onFilterPendingUnit(unit);
+                    }
+                },
+                plugins: {
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            title: (ctx) => `ค้างหน่วยงาน: ${ctx[0].label}`,
+                            label: (ctx) => ctx.parsed.y > 0 ? `${ctx.dataset.label}: ${ctx.parsed.y} Call` : null,
+                            footer: (ctx) => {
+                                let total = 0;
+                                ctx.forEach(c => { if (c.parsed.y > 0) total += c.parsed.y; });
+                                return `รวม: ${total} Call`;
+                            }
+                        }
+                    },
+                    legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 20 } }
+                }
+            },
+            plugins: [{
+                id: 'totalLabel',
+                afterDatasetsDraw(chart) {
+                    const { ctx, data: chartData, scales } = chart;
+                    const xScale = scales.x;
+                    const yScale = scales.y;
+                    ctx.save();
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#333';
+                    ctx.font = 'bold 12px sans-serif';
+                    for (let i = 0; i < chartData.labels.length; i++) {
+                        let totalVal = 0;
+                        chartData.datasets.forEach(ds => { totalVal += (ds.data[i] || 0); });
+                        if (totalVal > 0) {
+                            const x = xScale.getPixelForValue(i);
+                            const y = yScale.getPixelForValue(totalVal);
+                            ctx.fillText(totalVal, x, y - 5);
+                        }
+                    }
+                    ctx.restore();
+                }
+            }]
+        });
+
+        return () => {
+            if (chartRef.current) {
+                chartRef.current.destroy();
+                chartRef.current = null;
+            }
+        };
+    }, [isOpen, data, onFilterPendingUnit]);
+
+    if (!isOpen) return null;
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="graph-modal-content">
+                <span className="close" onClick={onClose}>×</span>
+                <h2>จำนวน Call ตามค้างหน่วยงานและสถานะ</h2>
+                <canvas ref={canvasRef} style={{ maxHeight: '600px', height: '60vh' }}></canvas>
+            </div>
+        </div>
+    );
+}
+
+// ===== Summary Modal (Pivot: TeamPlant × StatusCall) =====
+export function SummaryModal({ isOpen, onClose, data = [] }) {
+    const summaryData = useMemo(() => {
+        if (!data || data.length === 0) return null;
+
+        const ticketCounts = {};
+        const pivotData = {};
+        const teamPlantSet = new Set();
+        const statusCallSet = new Set();
+        let waitingResponseCount = 0;
+        let overdueCount = 0;
+
+        data.forEach(row => {
+            const ticket = row["Ticket Number"];
+            if (ticketCounts[ticket]) return;
+            ticketCounts[ticket] = true;
+
+            const tp = getCleanTeamPlant(row["TeamPlant"] || "ไม่ระบุ");
+            const status = row["StatusCall"] || "ไม่ระบุ";
+            teamPlantSet.add(tp);
+            statusCallSet.add(status);
+
+            if (!pivotData[tp]) pivotData[tp] = {};
+            pivotData[tp][status] = (pivotData[tp][status] || 0) + 1;
+
+            if (row['คลังตอบ'] === 'รอตรวจสอบ') waitingResponseCount++;
+            if ((parseFloat(row['DayRepair']) || 0) > 7) overdueCount++;
+        });
+
+        const teamPlants = [...teamPlantSet];
+        const statusCalls = [...statusCallSet].sort();
+        const totalCalls = Object.keys(ticketCounts).length;
+
+        // Sort team plants by total descending
+        const sorted = teamPlants.map(tp => {
+            const total = statusCalls.reduce((s, st) => s + (pivotData[tp]?.[st] || 0), 0);
+            return { tp, total };
+        }).sort((a, b) => b.total - a.total);
+
+        // Calculate totals for each status
+        const columnTotals = statusCalls.map(s => {
+            return teamPlants.reduce((sum, tp) => sum + (pivotData[tp]?.[s] || 0), 0);
+        });
+
+        return {
+            totalCalls,
+            waitingResponseCount,
+            overdueCount,
+            statusCalls,
+            sorted,
+            pivotData,
+            columnTotals
+        };
+    }, [data]);
+
+    const handlePrint = () => {
+        const printContent = document.getElementById('summary-print-area');
+        if (!printContent) return;
+        const w = window.open('', '_blank');
+        w.document.write(`<html><head><title>สรุปข้อมูล Call ค้าง</title>
+            <style>
+                body { font-family: 'Prompt', sans-serif; padding: 20px; }
+                .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 30px; }
+                .stat-card { padding: 15px; border: 1px solid #ddd; border-radius: 10px; text-align: center; }
+                table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+                th { background: #f8f9fa; font-weight: bold; }
+                .text-left { text-align: left; }
+                .total-row { font-weight: bold; background: #eee; }
+            </style>
+        </head><body>${printContent.innerHTML}</body></html>`);
+        w.document.close();
+        w.print();
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="premium-modal-content" style={{ maxWidth: '1200px' }}>
+                <div className="premium-modal-header">
+                    <h3><i className="fas fa-chart-pie" style={{ marginRight: 10 }}></i> สรุปข้อมูล Call ค้าง</h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                        <button className="action-button premium-button" onClick={handlePrint}>
+                            <i className="fas fa-print"></i> พิมพ์สรุป
+                        </button>
+                        <span className="premium-modal-close" onClick={onClose}>×</span>
+                    </div>
+                </div>
+                <div className="premium-modal-body">
+                    {!summaryData ? (
+                        <div style={{ textAlign: 'center', padding: '40px' }}>ไม่มีข้อมูล</div>
+                    ) : (
+                        <div id="summary-print-area">
+                            <div className="summary-stat-grid" style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+                                gap: '20px',
+                                marginBottom: '25px'
+                            }}>
+                                <div className="stat-card" style={{
+                                    background: 'linear-gradient(135deg, #007bff, #0056b3)',
+                                    color: 'white',
+                                    padding: '20px',
+                                    borderRadius: '16px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '20px',
+                                    boxShadow: '0 8px 16px rgba(0,123,255,0.2)'
+                                }}>
+                                    <div style={{ width: '50px', height: '50px', borderRadius: '12px', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>
+                                        <i className="fas fa-phone-alt"></i>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '13px', opacity: 0.9 }}>จำนวน Call ทั้งหมด</div>
+                                        <div style={{ fontSize: '28px', fontWeight: '800' }}>{summaryData.totalCalls} Call</div>
+                                    </div>
+                                </div>
+
+                                <div className="stat-card" style={{
+                                    background: 'linear-gradient(135deg, #ffc107, #e0a800)',
+                                    color: 'white',
+                                    padding: '20px',
+                                    borderRadius: '16px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '20px',
+                                    boxShadow: '0 8px 16px rgba(255,193,7,0.2)'
+                                }}>
+                                    <div style={{ width: '50px', height: '50px', borderRadius: '12px', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>
+                                        <i className="fas fa-clock"></i>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '13px', opacity: 0.9 }}>รอตรวจสอบ (คลังตอบ)</div>
+                                        <div style={{ fontSize: '28px', fontWeight: '800' }}>{summaryData.waitingResponseCount} Call</div>
+                                    </div>
+                                </div>
+
+                                <div className="stat-card" style={{
+                                    background: 'linear-gradient(135deg, #dc3545, #c82333)',
+                                    color: 'white',
+                                    padding: '20px',
+                                    borderRadius: '16px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '20px',
+                                    boxShadow: '0 8px 16px rgba(220,53,69,0.2)'
+                                }}>
+                                    <div style={{ width: '50px', height: '50px', borderRadius: '12px', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>
+                                        <i className="fas fa-exclamation-triangle"></i>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '13px', opacity: 0.9 }}>ค้างมากกว่า 7 วัน</div>
+                                        <div style={{ fontSize: '28px', fontWeight: '800' }}>{summaryData.overdueCount} Call</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="premium-table-container" style={{
+                                background: 'white',
+                                borderRadius: '16px',
+                                border: '1px solid #eef2f7',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.03)',
+                                overflow: 'hidden'
+                            }}>
+                                <div style={{ maxHeight: '60vh', overflow: 'auto' }}>
+                                    <table className="summary-pivot-table" style={{
+                                        width: '100%',
+                                        borderCollapse: 'separate',
+                                        borderSpacing: 0,
+                                        fontSize: '13px'
+                                    }}>
+                                        <thead>
+                                            <tr>
+                                                <th style={{
+                                                    position: 'sticky', top: 0, left: 0, zIndex: 10,
+                                                    background: '#f8f9fa', padding: '15px 20px',
+                                                    borderBottom: '2px solid #dee2e6', textAlign: 'left',
+                                                    color: '#2d3748', minWidth: '180px'
+                                                }}>ศูนย์พื้นที่</th>
+                                                <th style={{
+                                                    position: 'sticky', top: 0, zIndex: 9,
+                                                    background: '#f8f9fa', padding: '15px 20px',
+                                                    borderBottom: '2px solid #dee2e6', textAlign: 'center',
+                                                    color: '#2d3748', fontWeight: 'bold'
+                                                }}>รวม</th>
+                                                {summaryData.statusCalls.map(status => (
+                                                    <th key={status} style={{
+                                                        position: 'sticky', top: 0, zIndex: 9,
+                                                        background: '#f8f9fa', padding: '15px 15px',
+                                                        borderBottom: '2px solid #dee2e6', textAlign: 'center',
+                                                        color: CHART_COLORS[status] || '#495057',
+                                                        whiteSpace: 'nowrap'
+                                                    }}>{status}</th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {summaryData.sorted.map(({ tp, total }, rowIndex) => (
+                                                <tr key={tp} style={{
+                                                    background: rowIndex % 2 === 0 ? '#fff' : '#fafbfc',
+                                                    transition: 'all 0.2s'
+                                                }} className="summary-row-hover">
+                                                    <td style={{
+                                                        position: 'sticky', left: 0, zIndex: 5,
+                                                        background: rowIndex % 2 === 0 ? '#fff' : '#fafbfc',
+                                                        padding: '12px 20px', borderBottom: '1px solid #edf2f7',
+                                                        fontWeight: '500', color: '#2d3748'
+                                                    }}>{tp}</td>
+                                                    <td style={{
+                                                        padding: '12px 20px', borderBottom: '1px solid #edf2f7',
+                                                        textAlign: 'center', fontWeight: 'bold', color: '#007bff'
+                                                    }}>{total || '-'}</td>
+                                                    {summaryData.statusCalls.map(status => {
+                                                        const val = summaryData.pivotData[tp]?.[status] || 0;
+                                                        return (
+                                                            <td key={status} style={{
+                                                                padding: '12px 15px', borderBottom: '1px solid #edf2f7',
+                                                                textAlign: 'center', color: val > 0 ? '#4a5568' : '#cbd5e0'
+                                                            }}>{val || '-'}</td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                            <tr style={{ background: '#f8f9fa', fontWeight: '800' }}>
+                                                <td style={{
+                                                    position: 'sticky', left: 0, zIndex: 5,
+                                                    background: '#f8f9fa', padding: '15px 20px',
+                                                    borderTop: '2px solid #dee2e6', color: '#1a202c'
+                                                }}>รวมทั้งหมด</td>
+                                                <td style={{
+                                                    padding: '15px 20px', borderTop: '2px solid #dee2e6',
+                                                    textAlign: 'center', color: '#007bff'
+                                                }}>{summaryData.totalCalls}</td>
+                                                {summaryData.columnTotals.map((total, idx) => (
+                                                    <td key={idx} style={{
+                                                        padding: '15px 15px', borderTop: '2px solid #dee2e6',
+                                                        textAlign: 'center', color: total > 0 ? '#1a202c' : '#cbd5e0'
+                                                    }}>{total || '-'}</td>
+                                                ))}
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+            <style>{`
+                .summary-row-hover:hover {
+                    background-color: #f1f8ff !important;
+                }
+                .summary-row-hover:hover td {
+                    background-color: #f1f8ff !important;
+                }
+                .premium-button {
+                    background: rgba(255,255,255,0.2);
+                    color: white;
+                    border: 1px solid rgba(255,255,255,0.3);
+                    padding: 8px 16px;
+                    border-radius: 10px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                }
+                .premium-button:hover {
+                    background: rgba(255,255,255,0.3);
+                    transform: translateY(-1px);
+                }
+                @media print {
+                    .modal { position: static; background: none; }
+                    .premium-modal-content { box-shadow: none; border: none; }
+                    .premium-modal-header, .premium-modal-close { display: none; }
+                    .premium-table-container { box-shadow: none; border: 1px solid #ddd; }
+                    th { position: static !important; }
+                    td { position: static !important; }
+                }
+            `}</style>
+        </div>
+    );
+}
+
+// ===== Spare Summary Modal (Full Port from call.js) =====
+export function SpareSummaryModal({ isOpen, onClose, data = [], rawSources = {}, isLoading }) {
+    const [prgFilter, setPrgFilter] = useState('');
+    const [supplierFilter, setSupplierFilter] = useState('');
+
+    const handlePrgChange = (val) => {
+        setPrgFilter(val);
+        setSupplierFilter(''); // reset supplier when PRG changes
+    };
+
+    const computedData = useMemo(() => {
+        if (!data || data.length === 0) return null;
+        const { nawaRawData = [], poRawData = [], prRawData = [] } = rawSources;
+
+        // Filter: exclude by StatusX (row-level), only rows with material
+        const EXCLUDE_STATUS = new Set(["ระหว่างขนส่ง", "เบิกนวนคร", "ขอซื้อขอซ่อม"]);
+        const filteredRows = data.filter(row => {
+            const sx = (row["StatusX"] || row["StatusCall"] || "").trim();
+            const mat = (row["Material"] || "").trim();
+            return !EXCLUDE_STATUS.has(sx) && mat !== "";
+        });
+        if (filteredRows.length === 0) return null;
+
+        // Collect pending units
+        const pendingUnitsSet = new Set();
+        filteredRows.forEach(row => {
+            const unit = (row["ค้างหน่วยงาน"] || "ไม่ระบุ").replace(/Stock\s*/gi, '').trim();
+            if (unit) pendingUnitsSet.add(unit);
+        });
+        const pendingUnits = [...pendingUnitsSet].sort();
+
+        // Build pivot: Material|Description → { total, [pendingUnit]: count }
+        const pivotData = {};
+        let totalQuantity = 0;
+        filteredRows.forEach(row => {
+            const matDesc = row["Material"] + '|' + getDesc(row);
+            const pending = (row["ค้างหน่วยงาน"] || "ไม่ระบุ").replace(/Stock\s*/gi, '').trim();
+            if (!pivotData[matDesc]) {
+                pivotData[matDesc] = { total: 0 };
+                pendingUnits.forEach(u => pivotData[matDesc][u] = 0);
+            }
+            if (pending) {
+                pivotData[matDesc].total++;
+                pivotData[matDesc][pending]++;
+                totalQuantity++;
+            }
+        });
+
+        const sortedMaterials = Object.keys(pivotData).sort((a, b) => pivotData[b].total - pivotData[a].total);
+        const topMaterial = sortedMaterials.length > 0 ? sortedMaterials[0].replace('|', '\t') : '-';
+
+        // PRG lookup from nawaRawData
+        const prgMap = {};
+        const nm = (mat) => String(mat || '').trim().replace(/^0+/, '');
+
+        sortedMaterials.forEach(matDesc => {
+            const [material] = matDesc.split('|');
+            const matNorm = nm(material);
+            let prgVal = '-';
+            if (nawaRawData.length > 0) {
+                const nMatch = nawaRawData.find(r => nm(r["Material"] || "") === matNorm);
+                if (nMatch) {
+                    const pgKey = Object.keys(nMatch).find(k =>
+                        k.trim() === "Purchasing Group" || k.trim() === "Purch. Group" || k.trim() === "PG"
+                    );
+                    if (pgKey && nMatch[pgKey]) {
+                        const pg = nMatch[pgKey].toString().trim();
+                        if (pg === "301") prgVal = "ในประเทศ";
+                        else if (pg === "302") prgVal = "ต่างประเทศ";
+                        else prgVal = pg;
+                    }
+                }
+            }
+            prgMap[material] = prgVal;
+        });
+
+        // PR lookup from prRawData
+        const prMap = {};
+        if (prRawData.length > 0) {
+            prRawData.forEach(r => {
+                const matKey = normalizeMaterial(r["Material"] || "");
+                if (!matKey) return;
+                const req = parseFloat((r["Quantity requested"] || "0").toString().replace(/,/g, '')) || 0;
+                const ord = parseFloat((r["Quantity ordered"] || "0").toString().replace(/,/g, '')) || 0;
+                const qty = req - ord;
+                if (qty > 0) {
+                    prMap[matKey] = (prMap[matKey] || 0) + qty;
+                }
+            });
+        }
+
+        // PO lookups from poRawData
+        const poMap = {};
+        const poDetailMap = {};
+        if (poRawData.length > 0) {
+            sortedMaterials.forEach(matDesc => {
+                const [material] = matDesc.split('|');
+                const matNorm = nm(material);
+                const poRecords = poRawData.filter(r => {
+                    const rMat = nm(r["Material"] || "");
+                    const qty = parseFloat(String(r["Still to be delivered (qty)"] || "0").replace(/,/g, ''));
+                    return rMat === matNorm && !isNaN(qty) && qty > 0;
+                });
+
+                let totalPo = 0;
+                poRecords.forEach(r => {
+                    const qty = parseFloat(String(r["Still to be delivered (qty)"] || "0").replace(/,/g, ''));
+                    if (!isNaN(qty)) totalPo += qty;
+                });
+                poMap[material] = totalPo;
+
+                // Find closest delivery date PO record
+                if (poRecords.length > 0) {
+                    let closest = poRecords[0];
+                    let closestDate = null;
+                    poRecords.forEach(r => {
+                        const dateStr = r["Document Date"] || r["Date"] || r["Delivery Date"] || r["Deliv.Date"] || "";
+                        let d = null;
+                        if (dateStr) {
+                            const parts = dateStr.split('/');
+                            if (parts.length === 3) {
+                                d = new Date(parseInt(parts[2]) < 2000 ? parseInt(parts[2]) + 2000 : parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+                            } else {
+                                d = new Date(dateStr);
+                            }
+                        }
+                        if (d && !isNaN(d.getTime())) {
+                            if (!closestDate || d < closestDate) { closestDate = d; closest = r; }
+                        }
+                    });
+                    poDetailMap[material] = {
+                        delivDate: closest["Document Date"] || closest["Date"] || closest["Delivery Date"] || closest["Deliv.Date"] || "-",
+                        poDoc: closest["Purchasing Document"] || closest["Purch.Doc."] || "-",
+                        supplier: (closest["Supplier/Supplying Plant"] || "-").trim(),
+                        qtyDeliv: closest["Still to be delivered (qty)"] || "-"
+                    };
+                }
+            });
+        }
+
+        // Nawa lookup
+        const nawaMap = {};
+        if (nawaRawData.length > 0) {
+            sortedMaterials.forEach(matDesc => {
+                const [material] = matDesc.split('|');
+                const matNorm = nm(material);
+                const nMatch = nawaRawData.find(r => nm(r["Material"] || "") === matNorm);
+                if (nMatch && nMatch["Unrestricted"]) {
+                    const val = parseFloat(nMatch["Unrestricted"].toString().replace(/,/g, '')) || 0;
+                    nawaMap[material] = val;
+                } else {
+                    nawaMap[material] = 0;
+                }
+            });
+        }
+
+        const prgOptions = new Set();
+        Object.values(prgMap).forEach(v => { if (v && v !== "-") prgOptions.add(v); });
+
+        return {
+            filteredRows, sortedMaterials, pivotData, pendingUnits,
+            totalQuantity, topMaterial, prgMap, prMap, poMap, poDetailMap, nawaMap,
+            prgOptions: [...prgOptions].sort()
+        };
+    }, [data, rawSources]);
+
+    // Supplier options filtered by current PRG selection
+    const supplierOptions = useMemo(() => {
+        if (!computedData) return [];
+        const { sortedMaterials, prgMap, poDetailMap, nawaMap, pivotData } = computedData;
+        const opts = new Set();
+        sortedMaterials.forEach(matDesc => {
+            const [material] = matDesc.split('|');
+            const nawaVal = nawaMap[material] || 0;
+            if (pivotData[matDesc].total <= nawaVal && nawaVal > 0) return;
+            if (prgFilter && prgMap[material] !== prgFilter) return;
+            const detail = poDetailMap[material];
+            if (detail && detail.supplier && detail.supplier !== '-') {
+                opts.add(detail.supplier);
+            }
+        });
+        return [...opts].sort();
+    }, [computedData, prgFilter]);
+
+    // Apply PRG + Supplier filter to rows
+    const displayRows = useMemo(() => {
+        if (!computedData) return [];
+        const { sortedMaterials, pivotData, prgMap, poDetailMap, nawaMap } = computedData;
+
+        return sortedMaterials.filter(matDesc => {
+            const [material] = matDesc.split('|');
+            const nawaVal = nawaMap[material] || 0;
+            const total = pivotData[matDesc].total;
+
+            // Skip rows where total <= nawa (matching original)
+            if (total <= nawaVal && nawaVal > 0) return false;
+
+            // PRG filter
+            if (prgFilter && prgMap[material] !== prgFilter) return false;
+
+            // Supplier filter
+            if (supplierFilter) {
+                const detail = poDetailMap[material];
+                if (!detail || detail.supplier !== supplierFilter) return false;
+            }
+
+            return true;
+        });
+    }, [computedData, prgFilter, supplierFilter]);
+
+    if (!isOpen) return null;
+
+    if (isLoading && (!data || data.length === 0)) {
+        return (
+            <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+                <div className="modal-content" style={{
+                    maxWidth: '95vw', width: '95vw', minHeight: 420,
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    justifyContent: 'center', overflow: 'hidden', position: 'relative',
+                    background: 'var(--card-bg)'
+                }}>
+                    <span className="close" onClick={onClose} style={{ position: 'absolute', top: 16, right: 20, zIndex: 5 }}>×</span>
+                    <style>{`
+                        @keyframes sp-cw   { to { transform: rotate(360deg); } }
+                        @keyframes sp-ccw  { to { transform: rotate(-360deg); } }
+                        @keyframes sp-pulse {
+                            0%,100% { box-shadow: 0 0 0 0 rgba(0,123,255,0.5); transform: scale(1); }
+                            50%     { box-shadow: 0 0 24px 8px rgba(0,123,255,0.12); transform: scale(1.07); }
+                        }
+                        @keyframes sp-bounce {
+                            0%,80%,100% { transform: translateY(0); opacity: 0.35; }
+                            40%         { transform: translateY(-10px); opacity: 1; }
+                        }
+                        @keyframes sp-shimmer {
+                            0%   { transform: translateX(-100%); }
+                            100% { transform: translateX(400%); }
+                        }
+                        @keyframes sp-float {
+                            0%   { transform: translateY(0) translateX(0); opacity: 0; }
+                            10%  { opacity: 0.5; }
+                            90%  { opacity: 0.5; }
+                            100% { transform: translateY(-70px) translateX(12px); opacity: 0; }
+                        }
+                        @keyframes sp-fadein {
+                            from { opacity: 0; transform: translateY(16px); }
+                            to   { opacity: 1; transform: translateY(0); }
+                        }
+                    `}</style>
+
+                    {[...Array(7)].map((_, i) => (
+                        <div key={i} style={{
+                            position: 'absolute', borderRadius: '50%', pointerEvents: 'none',
+                            width: `${6 + (i % 4) * 4}px`, height: `${6 + (i % 4) * 4}px`,
+                            background: i % 3 === 0 ? 'rgba(0,123,255,0.2)' : i % 3 === 1 ? 'rgba(253,126,20,0.16)' : 'rgba(25,135,84,0.16)',
+                            left: `${8 + i * 12}%`, bottom: `${8 + (i % 3) * 10}%`,
+                            animation: `sp-float ${2.6 + i * 0.38}s ease-in-out ${i * 0.3}s infinite`
+                        }} />
+                    ))}
+
+                    <div style={{ position: 'relative', width: 140, height: 140, marginBottom: 32 }}>
+                        <div style={{
+                            position: 'absolute', inset: 0, borderRadius: '50%',
+                            border: '3px solid transparent',
+                            borderTopColor: '#007bff', borderRightColor: 'rgba(0,123,255,0.22)',
+                            animation: 'sp-cw 1.4s linear infinite'
+                        }} />
+                        <div style={{
+                            position: 'absolute', inset: 16, borderRadius: '50%',
+                            border: '3px solid transparent',
+                            borderTopColor: '#fd7e14', borderLeftColor: 'rgba(253,126,20,0.22)',
+                            animation: 'sp-ccw 1.0s linear infinite'
+                        }} />
+                        <div style={{
+                            position: 'absolute', inset: 32, borderRadius: '50%',
+                            border: '3px solid transparent',
+                            borderTopColor: '#198754', borderRightColor: 'rgba(25,135,84,0.22)',
+                            animation: 'sp-cw 0.7s linear infinite'
+                        }} />
+                        <div style={{
+                            position: 'absolute', inset: 47, borderRadius: '50%',
+                            background: 'linear-gradient(135deg, #007bff 0%, #0056b3 100%)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            animation: 'sp-pulse 2s ease-in-out infinite'
+                        }}>
+                            <i className="fas fa-boxes-stacked" style={{ fontSize: 20, color: '#fff' }} />
+                        </div>
+                    </div>
+
+                    <div style={{ textAlign: 'center', animation: 'sp-fadein 0.7s ease both' }}>
+                        <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-primary)', marginBottom: 6, letterSpacing: '-0.3px' }}>
+                            กำลังเตรียมข้อมูลอะไหล่
+                        </div>
+                        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 24 }}>
+                            รวบรวม PR · PO · Stock นวนคร · แต่ละสาขา
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 24 }}>
+                            {['#007bff', '#fd7e14', '#198754'].map((c, i) => (
+                                <span key={i} style={{
+                                    display: 'inline-block', width: 10, height: 10,
+                                    borderRadius: '50%', background: c,
+                                    animation: `sp-bounce 1.2s ease-in-out ${i * 0.2}s infinite`
+                                }} />
+                            ))}
+                        </div>
+                        <div style={{
+                            width: 260, height: 4, borderRadius: 999,
+                            background: 'var(--border-color)', overflow: 'hidden',
+                            position: 'relative', margin: '0 auto'
+                        }}>
+                            <div style={{
+                                position: 'absolute', top: 0, left: 0, height: '100%', width: '40%',
+                                borderRadius: 999,
+                                background: 'linear-gradient(90deg, transparent, #007bff, transparent)',
+                                animation: 'sp-shimmer 1.6s ease-in-out infinite'
+                            }} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+
+    if (!computedData) return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content">
+                <span className="close" onClick={onClose}>×</span>
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
+                    <i className="fas fa-box-open" style={{ fontSize: '48px', marginBottom: '10px', opacity: 0.5 }}></i>
+                    <p>ไม่พบรายการอะไหล่รอของเข้า</p>
+                </div>
+            </div>
+        </div>
+    );
+
+    const { pivotData, pendingUnits, totalQuantity, topMaterial, prgMap, prMap, poMap, poDetailMap, nawaMap, prgOptions } = computedData;
+
+    const exportCSV = () => {
+        const rows = [['Material', 'Description', 'PRG', 'PR', 'PO', 'กำหนดส่ง', 'PO Document', 'Supplier', 'จำนวนส่ง', 'นวนคร', 'รวม', ...pendingUnits]];
+        displayRows.forEach(matDesc => {
+            const [material, description] = matDesc.split('|');
+            const d = pivotData[matDesc];
+            const detail = poDetailMap[material] || {};
+            rows.push([
+                material, description, prgMap[material] || '-',
+                prMap[normalizeMaterial(material)] || '-',
+                poMap[material] || '-',
+                detail.delivDate || '-', detail.poDoc || '-', detail.supplier || '-', detail.qtyDeliv || '-',
+                nawaMap[material] || '-',
+                d.total, ...pendingUnits.map(u => d[u] || 0)
+            ]);
+        });
+        const csv = rows.map(r => r.map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(',')).join('\n');
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'spare_summary.csv';
+        link.click();
+    };
+
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content" style={{ maxWidth: '95vw', width: '95vw' }}>
+                <span className="close" onClick={onClose}>×</span>
+
+                {/* Header with filters */}
+                <div className="spare-header" style={{ margin: '10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        <div className="spare-title" style={{ fontWeight: 'bold', fontSize: '1.1em' }}>
+                            <i className="fas fa-cube"></i> สรุปรายการอะไหล่ (ยกเว้นระหว่างขนส่ง)
+                        </div>
+                        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                            <i className="fas fa-filter" style={{ position: 'absolute', left: '10px', color: '#fd7e14', fontSize: '11px', pointerEvents: 'none' }}></i>
+                            <select value={prgFilter} onChange={(e) => { setPrgFilter(e.target.value); }}
+                                style={{ padding: '6px 14px 6px 28px', borderRadius: '20px', border: '2px solid #fd7e14', fontSize: '12px', fontWeight: 600, color: '#fd7e14', background: '#fff', cursor: 'pointer', outline: 'none', minWidth: '120px' }}>
+                                <option value="">PRG: ทั้งหมด</option>
+                                {prgOptions.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                        </div>
+                        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                            <i className="fas fa-truck" style={{ position: 'absolute', left: '10px', color: '#6f42c1', fontSize: '11px', pointerEvents: 'none' }}></i>
+                            <select value={supplierFilter} onChange={(e) => { setSupplierFilter(e.target.value); }}
+                                style={{ padding: '6px 14px 6px 28px', borderRadius: '20px', border: '2px solid #6f42c1', fontSize: '12px', fontWeight: 600, color: '#6f42c1', background: '#fff', cursor: 'pointer', outline: 'none', minWidth: '140px' }}>
+                                <option value="">Supplier: ทั้งหมด</option>
+                                {supplierOptions.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span className="pill" style={{ background: 'var(--info-color)', color: '#fff', padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: 600 }}>
+                            {computedData.filteredRows.length} รายการ
+                        </span>
+                        <button onClick={exportCSV} title="Export CSV" style={{
+                            width: '36px', height: '36px', borderRadius: '50%', border: 'none',
+                            background: 'linear-gradient(135deg, #198754, #20c997)', color: '#fff',
+                            fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center',
+                            justifyContent: 'center', boxShadow: '0 3px 8px rgba(25,135,84,0.35)'
+                        }}><i className="fas fa-file-csv"></i></button>
+                        <button onClick={() => {
+                            const printContent = document.getElementById('spareSummaryTableArea');
+                            if (printContent) {
+                                const w = window.open('', '_blank');
+                                w.document.write(`<html><head><title>สรุปอะไหล่</title><style>table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:6px;text-align:center;font-size:11px}th{background:#f4f4f4}</style></head><body>${printContent.innerHTML}</body></html>`);
+                                w.document.close(); w.print();
+                            }
+                        }} title="พิมพ์" style={{
+                            width: '36px', height: '36px', borderRadius: '50%', border: 'none',
+                            background: 'linear-gradient(135deg, #0d6efd, #6ea8fe)', color: '#fff',
+                            fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center',
+                            justifyContent: 'center', boxShadow: '0 3px 8px rgba(13,110,253,0.35)'
+                        }}><i className="fas fa-print"></i></button>
+                    </div>
+                </div>
+
+                {/* Stat Cards */}
+                <div className="spare-stats" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2.5fr', gap: '10px', margin: '10px' }}>
+                    <div className="stat-card" style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '12px', textAlign: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' }}>
+                        <div style={{ fontSize: '11px', opacity: 0.7 }}>จำนวนรายการรวม</div>
+                        <div style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--info-color)' }}>{displayRows.length}</div>
+                    </div>
+                    <div className="stat-card" style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '12px', textAlign: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' }}>
+                        <div style={{ fontSize: '11px', opacity: 0.7 }}>จำนวนชิ้นรวม</div>
+                        <div style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--warning-color)' }}>{totalQuantity}</div>
+                    </div>
+                    <div className="stat-card" style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '12px', textAlign: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' }}>
+                        <div style={{ fontSize: '11px', opacity: 0.7 }}>รอมากที่สุด</div>
+                        <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'var(--danger-color)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={topMaterial}>{topMaterial}</div>
+                    </div>
+                </div>
+
+                {/* Table */}
+                <div id="spareSummaryTableArea" style={{ margin: '10px', overflow: 'auto', maxHeight: '60vh' }}>
+                    <table className="detail-table" style={{ fontSize: '12px', width: '100%' }}>
+                        <thead>
+                            <tr>
+                                <th style={{ width: '12%' }}>Material</th>
+                                <th style={{ width: '22%' }}>Description</th>
+                                <th style={{ width: '7%', backgroundColor: '#fd7e14', color: '#fff' }}>PRG</th>
+                                <th style={{ width: '5%' }}>PR</th>
+                                <th style={{ width: '5%' }}>PO</th>
+                                <th style={{ width: '7%' }}>กำหนดส่ง</th>
+                                <th style={{ width: '7%' }}>PO Document</th>
+                                <th style={{ width: '8%' }}>Supplier</th>
+                                <th style={{ width: '5%' }}>จำนวนส่ง</th>
+                                <th style={{ width: '5%', backgroundColor: '#fd7e14', color: '#fff' }}>นวนคร</th>
+                                <th className="fixed-width" style={{ background: 'rgba(0,0,0,0.02)' }}>รวม</th>
+                                {pendingUnits.map(u => <th key={u} className="fixed-width">{u}</th>)}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {displayRows.length === 0 ? (
+                                <tr><td colSpan={11 + pendingUnits.length} style={{ textAlign: 'center', padding: '20px' }}>ไม่มีข้อมูล</td></tr>
+                            ) : displayRows.map(matDesc => {
+                                const [material, description] = matDesc.split('|');
+                                const d = pivotData[matDesc];
+                                const materialPrg = prgMap[material] || '-';
+                                const matNorm = normalizeMaterial(material);
+                                const prVal = prMap[matNorm] || 0;
+                                const poVal = poMap[material] || 0;
+                                const detail = poDetailMap[material] || {};
+                                const nawaVal = nawaMap[material] || 0;
+
+                                return (
+                                    <tr key={matDesc}>
+                                        <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{material}</td>
+                                        <td style={{ fontSize: '11px', color: 'var(--text-secondary)', textAlign: 'left' }}>{description}</td>
+                                        <td style={{ textAlign: 'center', color: materialPrg === 'ในประเทศ' ? '#0d6efd' : materialPrg === 'ต่างประเทศ' ? '#dc3545' : '#fd7e14', fontWeight: 'bold' }}>{materialPrg}</td>
+                                        <td style={{ textAlign: 'center' }}>
+                                            {prVal > 0 ? <span className="request-pill" style={{ backgroundColor: '#e83e8c', color: '#fff', cursor: 'pointer' }}>{prVal}</span> : '-'}
+                                        </td>
+                                        <td style={{ textAlign: 'center' }}>
+                                            {poVal > 0 ? <span className="request-pill" style={{ backgroundColor: '#0d6efd', color: '#fff', cursor: 'pointer' }}>{poVal}</span> : '-'}
+                                        </td>
+                                        <td style={{ textAlign: 'center', fontSize: '11px' }}>{detail.delivDate || '-'}</td>
+                                        <td style={{ textAlign: 'center', fontSize: '11px' }}>{detail.poDoc || '-'}</td>
+                                        <td style={{ textAlign: 'left', fontSize: '11px' }}>{detail.supplier || '-'}</td>
+                                        <td style={{ textAlign: 'center', fontSize: '11px', fontWeight: 'bold', color: '#198754' }}>{detail.qtyDeliv || '-'}</td>
+                                        <td style={{ textAlign: 'center', color: '#1a237e', fontWeight: 'bold' }}>{nawaVal > 0 ? nawaVal : '-'}</td>
+                                        <td className="fixed-width" style={{ background: 'rgba(0,0,0,0.02)' }}>
+                                            {d.total === 0 ? '-' : <span style={{ backgroundColor: 'var(--danger-color)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '2px 10px', borderRadius: '99px', fontWeight: 'bold', fontSize: '13px' }}>{d.total}</span>}
+                                        </td>
+                                        {pendingUnits.map(u => (
+                                            <td key={u} className="fixed-width" style={{ fontWeight: d[u] > 0 ? 'bold' : 'normal', color: d[u] > 0 ? 'var(--danger-color)' : '#ccc' }}>
+                                                {d[u] === 0 ? '-' : d[u]}
+                                            </td>
+                                        ))}
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ===== Action Modal =====
+export function ActionModal({
+    isOpen,
+    onClose,
+    title,
+    ticket,
+    material,
+    children,
+    onSubmit,
+    onDelete,
+    cancelText = "ยกเลิก"
+}) {
+    if (!isOpen) return null;
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content" style={{ maxWidth: '400px', textAlign: 'center' }}>
+                <span className="close" onClick={onClose}>×</span>
+                <h2>{title}</h2>
+                <p style={{ marginBottom: '20px' }}>
+                    Ticket: <span style={{ fontWeight: 'bold' }}>{ticket}</span><br />
+                    {material && <>Material: <span style={{ fontWeight: 'bold' }}>{material}</span></>}
+                </p>
+                {children}
+                <div style={{ display: 'grid', gridTemplateColumns: onDelete ? '1fr 1fr 1fr' : '1fr 1fr', gap: '10px', marginTop: '15px' }}>
+                    <button className="action-button" style={{ background: 'var(--success-color)', width: '100%' }} onClick={onSubmit}>
+                        <i className="fas fa-check"></i> ตกลง
+                    </button>
+                    {onDelete && (
+                        <button className="action-button" style={{ background: 'var(--danger-color)', width: '100%' }} onClick={onDelete}>
+                            <i className="fas fa-trash"></i> ลบ
+                        </button>
+                    )}
+                    <button className="action-button logout-button" style={{ width: '100%', fontSize: '0.9em', padding: '10px 5px' }} onClick={onClose}>
+                        <i className="fas fa-times"></i> {cancelText}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ===== Outside Request (นอกรอบ) Modal =====
+export function OutsideRequestModal({ isOpen, onClose, row, onSubmit }) {
+    const [quantity, setQuantity] = useState(1);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isSuccess, setIsSuccess] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) {
+            setQuantity(1);
+            setIsSubmitting(false);
+            setIsSuccess(false);
+        }
+    }, [isOpen, row]);
+
+    if (!isOpen || !row) return null;
+
+    const desc = getDesc(row);
+    // Parse user object from localStorage
+    const userStr = localStorage.getItem('user');
+    const userObj = userStr ? JSON.parse(userStr) : {};
+
+    const userName = userObj.Name || localStorage.getItem('userName') || 'ไม่ระบุ';
+    const employeeCode = userObj.IDRec || localStorage.getItem('username') || '-';
+    const userPlant = userObj.Plant || localStorage.getItem('userPlant') || '-';
+
+    const customer = `${row["Team"] || "-"} (${row["Brand"] || "-"})`;
+    const defaultPhone = "0909082850";
+
+    const handleSubmit = async () => {
+        if (quantity < 1 || isNaN(quantity)) {
+            alert('กรุณากรอกจำนวนที่ถูกต้อง (อย่างน้อย 1)');
+            return;
+        }
+
+        setIsSubmitting(true);
+        // Construct payload matching the original gasUrl expectations
+        const payload = {
+            material: row["Material"] || "-",
+            description: desc || "-",
+            quantity: quantity,
+            contact: defaultPhone,
+            employeeCode: employeeCode,
+            team: customer,
+            employeeName: userName,
+            callNumber: row["Ticket Number"] || "-",
+            callType: row["Call Type"] || "-",
+            remark: "",
+            status: "รอเบิก",
+            plant: userPlant
+        };
+
+        try {
+            await onSubmit(payload);
+            setIsSubmitting(false);
+            setIsSuccess(true);
+            setTimeout(() => {
+                onClose();
+            }, 800); // Wait 800ms to show success checkmark before closing
+        } catch (err) {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="modal" onClick={(e) => e.target.className.includes('modal') && onClose()}>
+            <div className="modal-content compact-modal" style={{ maxWidth: '500px', padding: 0, overflow: 'hidden' }}>
+                <div style={{
+                    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    padding: '20px',
+                    color: 'white',
+                    position: 'relative'
+                }}>
+                    <span className="close" onClick={onClose} style={{ color: 'white', position: 'absolute', top: '15px', right: '20px', textShadow: 'none' }}>×</span>
+                    <h3 style={{ margin: '0 0 15px 0', textAlign: 'center', fontSize: '18px', fontWeight: 600 }}>
+                        <i className="fas fa-shopping-cart" style={{ marginRight: '8px' }}></i> เบิกอะไหล่นอกรอบ
+                    </h3>
+
+                    <div style={{ background: 'rgba(255,255,255,0.1)', padding: '15px', borderRadius: '10px', marginBottom: '15px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '14px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Material:</strong>
+                                <span style={{ textAlign: 'right', flex: 1 }}>{row["Material"] || "-"}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Description:</strong>
+                                <span style={{ textAlign: 'right', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '250px' }} title={desc}>{desc || "-"}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Ticket Number:</strong>
+                                <span style={{ textAlign: 'right', flex: 1 }}>{row["Ticket Number"] || "-"}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Call Type:</strong>
+                                <span style={{ textAlign: 'right', flex: 1 }}>{row["Call Type"] || "-"}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>User:</strong>
+                                <span style={{ textAlign: 'right', flex: 1 }}>{userName}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Plant:</strong>
+                                <span style={{ textAlign: 'right', flex: 1 }}>{userPlant}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>Customer:</strong>
+                                <span style={{ textAlign: 'right', flex: 1, fontWeight: 'bold' }}>{customer}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '5px', borderBottom: '1px solid rgba(255,255,255,0.2)' }}>
+                                <strong style={{ color: '#ffd700' }}>เบอร์ติดต่อ:</strong>
+                                <span style={{ textAlign: 'right', flex: 1, fontWeight: 'bold' }}>{defaultPhone}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style={{ marginBottom: '15px' }}>
+                        <label htmlFor="outside-quantity" style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>จำนวน:</label>
+                        <input
+                            type="number"
+                            id="outside-quantity"
+                            value={quantity}
+                            min="1"
+                            onChange={(e) => setQuantity(parseInt(e.target.value) || '')}
+                            style={{
+                                width: '100%',
+                                padding: '10px',
+                                border: 'none',
+                                borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.9)',
+                                fontSize: '16px',
+                                color: '#333',
+                                outline: 'none',
+                                boxSizing: 'border-box',
+                                boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)'
+                            }}
+                        />
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
+                        <button
+                            onClick={onClose}
+                            style={{
+                                padding: '10px 20px',
+                                background: '#dc3545',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontWeight: 'bold',
+                                fontSize: '14px'
+                            }}
+                        >
+                            ยกเลิก
+                        </button>
+                        <button
+                            onClick={handleSubmit}
+                            disabled={isSubmitting || isSuccess}
+                            style={{
+                                padding: '10px 20px',
+                                background: isSuccess ? '#198754' : (isSubmitting ? '#6c757d' : '#28a745'),
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: (isSubmitting || isSuccess) ? 'not-allowed' : 'pointer',
+                                fontWeight: 'bold',
+                                fontSize: '14px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px',
+                                transition: 'all 0.3s ease',
+                                minWidth: '90px',
+                                justifyContent: 'center'
+                            }}
+                        >
+                            {isSubmitting ? (
+                                <><i className="fas fa-spinner fa-spin"></i> กำลังบันทึก...</>
+                            ) : isSuccess ? (
+                                <><i className="fas fa-check"></i> สำเร็จ</>
+                            ) : (
+                                "ยืนยัน"
+                            )}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ===== Helper for Sticker Printing =====
+export const printStickers = (rows) => {
+    if (!rows || (Array.isArray(rows) && rows.length === 0)) return;
+    const items = Array.isArray(rows) ? rows : [rows];
+
+    const uniqueName = new Date().getTime();
+    const windowFeatures = 'left=0,top=0,width=800,height=900,toolbar=0,scrollbars=0,status=0';
+    const printWindow = window.open('about:blank', uniqueName, windowFeatures);
+
+    const stickerHtml = items.map((row, index) => `
+        <div class="sticker-container" style="${index < items.length - 1 ? 'page-break-after: always;' : ''}">
+            <div class="header">SPARE PART STICKER</div>
+            <div class="ticket-number">${row["Ticket Number"]}</div>
+            <div class="field">
+                <div class="label">Brand:</div>
+                <div class="value">${row["Brand"] || "-"}</div>
+            </div>
+            <div class="field">
+                <div class="label">Team:</div>
+                <div class="value">${row["Team"] || "-"}</div>
+            </div>
+            <div class="field">
+                <div class="label">Material:</div>
+                <div class="value">${row["Material"]}</div>
+            </div>
+            <div class="field" style="flex: 1;">
+                <div class="label">Description:</div>
+                <div class="value">${getDesc(row)}</div>
+            </div>
+            <div class="field" style="border-top: 1px solid #000; padding-top: 2mm;">
+                <div class="label">ศูนย์พื้นที่:</div>
+                <div class="value">${getCleanTeamPlant(row["TeamPlant"])}</div>
+            </div>
+        </div>
+    `).join('');
+
+    printWindow.document.write(`
+        <html>
+            <head>
+                <title>Sticker Print</title>
+                <style>
+                    @page {
+                        size: 80mm 100mm;
+                        margin: 0;
+                    }
+                    body {
+                        margin: 0;
+                        padding: 5mm;
+                        font-family: 'Prompt', sans-serif;
+                        width: 80mm;
+                        box-sizing: border-box;
+                    }
+                    .sticker-container {
+                        border: 1px solid #000;
+                        height: 90mm; /* Slightly less than 100mm to avoid overflow */
+                        padding: 3mm;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 2mm;
+                        box-sizing: border-box;
+                    }
+                    .header {
+                        text-align: center;
+                        font-weight: bold;
+                        font-size: 14pt;
+                        border-bottom: 2px solid #000;
+                        padding-bottom: 2mm;
+                        margin-bottom: 2mm;
+                    }
+                    .field {
+                        display: flex;
+                        margin-bottom: 1mm;
+                    }
+                    .label {
+                        font-weight: bold;
+                        width: 25mm;
+                        font-size: 10pt;
+                    }
+                    .value {
+                        flex: 1;
+                        font-size: 10pt;
+                        word-break: break-all;
+                    }
+                    .ticket-number {
+                        font-size: 16pt;
+                        font-weight: 800;
+                        text-align: center;
+                        margin: 2mm 0;
+                        padding: 2mm;
+                        background: #eee;
+                    }
+                </style>
+            </head>
+            <body>
+                ${stickerHtml}
+            </body>
+        </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+    }, 250);
+};
+
+// ===== Sticker Print Modal (80x100 mm) =====
+export function StickerModal({ isOpen, onClose, row }) {
+    if (!isOpen || !row) return null;
+
+    const handlePrint = () => {
+        printStickers(row);
+    };
+
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content sticker-modal-content" style={{ maxWidth: '400px' }}>
+                <span className="close" onClick={onClose}>×</span>
+                <h3 style={{ textAlign: 'center', marginBottom: '20px' }}>ตัวอย่างสติกเกอร์ (80x100 mm)</h3>
+
+                <div id="sticker-preview" className="sticker-preview-box">
+                    <div className="sticker-mockup">
+                        <div className="sticker-mockup-header">SPARE PART STICKER</div>
+                        <div className="sticker-mockup-ticket">{row["Ticket Number"]}</div>
+                        <div className="sticker-mockup-field">
+                            <strong>Brand:</strong> {row["Brand"] || "-"}
+                        </div>
+                        <div className="sticker-mockup-field">
+                            <strong>Team:</strong> {row["Team"] || "-"}
+                        </div>
+                        <div className="sticker-mockup-field">
+                            <strong>Material:</strong> {row["Material"]}
+                        </div>
+                        <div className="sticker-mockup-field description-field">
+                            <strong>Desc:</strong> {getDesc(row)}
+                        </div>
+                        <div className="sticker-mockup-footer">
+                            <strong>ศูนย์พื้นที่:</strong> {getCleanTeamPlant(row["TeamPlant"])}
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
+                    <button className="action-button" style={{ flex: 1, backgroundColor: 'var(--success-color)' }} onClick={handlePrint}>
+                        <i className="fas fa-print"></i> พิมพ์สติกเกอร์
+                    </button>
+                    <button className="action-button logout-button" style={{ flex: 1 }} onClick={onClose}>
+                        <i className="fas fa-times"></i> ปิด
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+// ===== Update Guide Modal =====
+export function UpdateGuideModal({ isOpen, onClose }) {
+    if (!isOpen) return null;
+
+    const steps = [
+        "ดึงข้อมูล Call ค้างทั้งหมด (หัวข้อที่ 3: รายการงานสำหรับติดตาม Call ค้าง และ OverP)",
+        "ไม่ต้องใส่อะไร แล้วกดปุ่ม \"ค้นหา\"",
+        "หน้า Call แสดงข้อมูลทั้งหมด กดปุ่ม \"Excel\" เพื่อดาวน์โหลด",
+        "กลับมาที่หน้าคลังสินค้า Dashboard Call แล้วกดปุ่ม \"Data\"",
+        "เปิดไฟล์ปลายทาง แล้ว Import ข้อมูลจาก Excel ที่ดาวน์โหลด",
+        "เลือก Import > Upload > เลือกไฟล์ Excel > แทนที่สเปรดชีต > ตกลง",
+        "รอระบบรีเฟรชประมาณ 15 วินาที จากนั้นปิดไฟล์ เป็นอันเสร็จ"
+    ];
+
+    return (
+        <div className="modal" onClick={(e) => e.target.className === 'modal' && onClose()}>
+            <div className="modal-content premium-modal-content" style={{ maxWidth: '550px' }}>
+                <div className="premium-modal-header">
+                    <h3><i className="fas fa-info-circle" style={{ marginRight: 10 }}></i> วิธีอัพข้อมูล</h3>
+                    <span className="premium-modal-close" onClick={onClose}>&times;</span>
+                </div>
+                <div className="premium-modal-body" style={{ padding: '20px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                        {steps.map((step, index) => (
+                            <div key={index} style={{ display: 'flex', gap: '15px', alignItems: 'flex-start' }}>
+                                <div style={{
+                                    minWidth: '28px',
+                                    height: '28px',
+                                    background: 'var(--info-color)',
+                                    color: '#fff',
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontWeight: 'bold',
+                                    fontSize: '14px',
+                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                }}>
+                                    {index + 1}
+                                </div>
+                                <div style={{ fontSize: '15px', color: '#2c3e50', lineHeight: '1.4', paddingTop: '4px' }}>
+                                    {step}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div style={{ marginTop: '30px', textAlign: 'center' }}>
+                        <button
+                            className="action-button"
+                            style={{
+                                padding: '12px 40px',
+                                fontSize: '16px',
+                                fontWeight: 'bold',
+                                background: 'linear-gradient(135deg, #28a745, #218838)',
+                                boxShadow: '0 4px 15px rgba(40, 167, 69, 0.3)',
+                                border: 'none'
+                            }}
+                            onClick={onClose}
+                        >
+                            เข้าใจไหม
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
