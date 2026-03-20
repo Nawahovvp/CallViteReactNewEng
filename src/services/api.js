@@ -30,6 +30,7 @@ export const vipaUrl = `https://opensheet.elk.sh/${vipaSheetID}/${vipaSheetName}
 const nawaSheetID = '1x-B1xekpMm4p7fkKucvLjaewtp66uGIp8ZIxJJZAxMk';
 const nawaSheetName = 'Sheet1';
 export const nawaUrl = `https://opensheet.elk.sh/${nawaSheetID}/${nawaSheetName}`;
+export const nawaBackupUrl = `https://script.google.com/macros/s/AKfycbywtsN35exs0olcwpwrzIbfm93QyAai2ZfHgWbjeB88d-3XIPWy1e4j3hJqzy5i6loo4g/exec`;
 
 const plantStockSheetID = '1OtcgbmQdrI3gKJCGiDge6xuOsrT0GPxdKeFPjpvK3Rg';
 const plantStockSheetName = 'Sheet1';
@@ -140,7 +141,21 @@ export async function fetchAllData() {
         () => fetchWithTimeout(prUrl, { cache: 'no-store' }).then(safeJson),
         () => fetchWithTimeout(mainSapUrl, { cache: 'no-store' }).then(safeJson),
         () => fetchWithTimeout(vipaUrl, { cache: 'no-store' }).then(safeJson),
-        () => fetchWithTimeout(nawaUrl, { cache: 'no-store' }).then(safeJson),
+        () => fetchWithTimeout(nawaUrl, { cache: 'no-store' })
+            .then(res => {
+                if (!res.ok) throw new Error(`Primary Nawa failed: ${res.status}`);
+                return safeJson(res);
+            })
+            .catch(async (err) => {
+                console.warn("Primary Nawa fetch failed, trying backup:", err);
+                try {
+                    const backupRes = await fetchWithTimeout(nawaBackupUrl, { cache: 'no-store' });
+                    return await safeJson(backupRes);
+                } catch (backupErr) {
+                    console.error("Backup Nawa fetch also failed:", backupErr);
+                    return [];
+                }
+            }),
         () => fetchWithTimeout(plantStockUrl, { cache: 'no-store' }).then(safeJson),
         () => fetchWithTimeout(newPartLoadUrl, { cache: 'no-store' }).then(safeJson),
         () => fetchWithTimeout(projectLogLoadUrl, { cache: 'no-store' }).then(safeJson),
