@@ -230,15 +230,22 @@ export function EngDetailsModal({ isOpen, onClose, row, engData }) {
         
         if (!plantCode) return [];
 
-        // Find the specific plant data in engDataList
-        const plantEntry = engData.find(item => item.plant === plantCode);
-        if (!plantEntry || !Array.isArray(plantEntry.data)) return [];
-
-        return plantEntry.data.filter(engRow => {
-            const rMat = normalizeMaterial(engRow["Material"] || "");
-            const qty = parseFloat((engRow["จำนวน"] || engRow["Qty"] || "0").toString().replace(/,/g, ''));
-            return rMat === mat && !isNaN(qty) && qty > 0;
+        // Find rows matching plant and material across all sheets
+        const results = [];
+        engData.forEach(item => {
+            if (!Array.isArray(item.data)) return;
+            item.data.forEach(engRow => {
+                const rMat = normalizeMaterial(engRow["Material"] || "");
+                let rowPlant = (engRow["Plant"] || engRow["plant"] || "").toString().trim();
+                if (rowPlant.length === 3) rowPlant = "0" + rowPlant;
+                
+                const qty = parseFloat((engRow["จำนวน"] || engRow["Qty"] || "0").toString().replace(/,/g, ''));
+                if (rMat === mat && rowPlant === plantCode && !isNaN(qty) && qty > 0) {
+                    results.push(engRow);
+                }
+            });
         });
+        return results;
     }, [isOpen, row, engData]);
 
     if (!isOpen || !row) return null;

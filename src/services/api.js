@@ -45,21 +45,14 @@ export const logAndSyncUrl = "https://script.google.com/macros/s/AKfycbyA5gl4mdz
 export const teamPlantUrl = `https://opensheet.elk.sh/1eqVoLsZxGguEbRCC5rdI4iMVtQ7CK4T3uXRdx8zE3uw/TeamPlant`;
 
 // Plant-specific Eng data sources (Technician stock)
-export const engUrls = {
-    "0326": "https://opensheet.elk.sh/1CdtlV4F_zTs5YTRX4fwtpinVuyRin_vI_d12wF1icmI/0326Eng",
-    "0330": "https://opensheet.elk.sh/1Eir-zDojK6nLIlVbW7OgJvuhbuzfaJ-X4ALN9J4aGNU/0330Eng",
-    "0304": "https://opensheet.elk.sh/1uCnhxCUH5ZPer7lYkPC95YMhlQ6a345S51w_S7TR2qM/0304Eng",
-    "0313": "https://opensheet.elk.sh/1o2_TfNW1sd-Nm3QcF77OrcLlf40DqKdn7MNieIE7P-Y/0313Eng",
-    "0307": "https://opensheet.elk.sh/1tPh9p8GWXaH8k5YMpIhBlSf3bKNKcNMjKSwiQFjaCbs/0307Eng",
-    "0309": "https://opensheet.elk.sh/169L7d8lqctYIFrqGji-0880n0bwBBXKZTaygDXFaVug/0309Eng",
-    "0312": "https://opensheet.elk.sh/1X2kPue19_af8xVp7ItATl5Ht5qfpADwqt7ENJzPypIY/0312Eng",
-    "0305": "https://opensheet.elk.sh/1ITMIVaEk63f1kEb0n3dDYGQzQNUGHbXneF4rR3EVv3s/0305Eng",
-    "0319": "https://opensheet.elk.sh/1CZthsi5JcGDhgVmGVBc8bTEPLkcqwvMJbJpST4wyICg/0319Eng",
-    "0320": "https://opensheet.elk.sh/1huVSCyMgrbd_ULaALZO-ggcdEFZ3J_papPSTU5HJZRo/0320Eng",
-    "0366": "https://opensheet.elk.sh/1aNRbELLDDWaL8PdNT1UJkc_5Ihpj9YCHL8xCydH4Rys/0366Eng",
-    "0311": "https://opensheet.elk.sh/1oU3X9p67a_u7j1IiHgPrpwwgTgDjZu8r78hafE38l9M/0311Eng",
-    "0369": "https://opensheet.elk.sh/12Bc9irmSK-45w-9hsrMKz6_zGxsVyiflEGvbk2fKdA0/0369Eng"
-};
+const engBaseId = "1yPYR-Lyg7RUj8chHgY9NQ_D5arubvf4kW-YJvJiEOOg";
+export const engUrlsArray = [
+    `https://opensheet.elk.sh/${engBaseId}/Sheet1`,
+    `https://opensheet.elk.sh/${engBaseId}/Sheet2`,
+    `https://opensheet.elk.sh/${engBaseId}/Sheet3`,
+    `https://opensheet.elk.sh/${engBaseId}/Sheet4`,
+    `https://opensheet.elk.sh/${engBaseId}/Sheet5`
+];
 
 // Fetch utils
 export async function fetchWithTimeout(resource, options = {}) {
@@ -154,8 +147,8 @@ export async function fetchAllData() {
         () => fetchWithTimeout(updateUrl, { cache: 'no-store' }).then(safeJson),
         () => fetchWithTimeout(teamPlantUrl, { cache: 'no-store' }).then(safeJson),
         // All Eng spreadsheets
-        ...Object.entries(engUrls).map(([plant, url]) => 
-            () => fetchWithTimeout(url, { cache: 'no-store' }).then(safeJson).then(data => ({ plant, data }))
+        ...engUrlsArray.map((url, i) => 
+            () => fetchWithTimeout(url, { cache: 'no-store' }).then(safeJson).then(data => ({ sourceId: `Sheet${i+1}`, data }))
         )
     ];
 
@@ -184,7 +177,7 @@ export async function fetchAllData() {
 
     const engDataResults = results.slice(12).map((res, i) => {
         if (res.status === 'fulfilled') return res.value;
-        return { plant: Object.keys(engUrls)[i], data: [] };
+        return { sourceId: `Sheet${i+1}`, data: [] };
     });
 
     return {

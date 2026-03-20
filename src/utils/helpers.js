@@ -262,7 +262,6 @@ function computeEngQuantities(engDataList) {
     if (!Array.isArray(engDataList)) return byPlant;
     
     engDataList.forEach(item => {
-        const plant = item.plant;
         const data = item.data;
         if (!Array.isArray(data)) return;
         
@@ -270,12 +269,18 @@ function computeEngQuantities(engDataList) {
             const material = normalizeMaterial(row["Material"] || "");
             if (!material) return;
             
+            let rowPlant = (row["Plant"] || row["plant"] || "").toString().trim();
+            if (rowPlant.length === 3) {
+                rowPlant = "0" + rowPlant;
+            }
+            if (!rowPlant) return;
+
             const qtyRaw = row["จำนวน"] || row["Qty"] || 0;
             const qty = parseFloat((qtyRaw + "").replace(/,/g, ''));
             const team = (row["หน่วยงาน"] || row["Team"] || "").toString().trim();
 
             if (!isNaN(qty) && qty > 0) {
-                const key = `${plant}_${material}`;
+                const key = `${rowPlant}_${material}`;
                 if (!byPlant[key]) {
                     byPlant[key] = { qty: 0, teams: new Set() };
                 }
