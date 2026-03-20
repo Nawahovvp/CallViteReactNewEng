@@ -14,6 +14,8 @@ import { PoDetailsModal, PrDetailsModal, OtherPlantModal, StatusEditModal, Proje
 
 import { useAppData } from './hooks/useAppData';
 import { PLANT_MAPPING, exportToCSV } from './utils/helpers';
+import { syncSummaryToGoogleSheet } from './services/api';
+import { computeSpareSummaryData, prepareSyncPayload } from './utils/syncHelpers';
 import SpareSummaryPage from './components/SpareSummaryPage';
 import GMSummaryPage from './components/GMSummaryPage';
 
@@ -69,6 +71,33 @@ function App() {
     updateRowLocally,
     handleOutsideRequest
   } = useAppData();
+
+  const [showSyncSuccess, setShowSyncSuccess] = useState(false);
+  const [hasAutoSynced, setHasAutoSynced] = useState(false);
+
+  // Background Auto-Sync logic (Happens once per session after data is loaded)
+  useEffect(() => {
+    if (!isLoading && data.length > 0 && !hasAutoSynced) {
+      const runSync = async () => {
+        try {
+          const computed = computeSpareSummaryData(data, rawSources);
+          if (computed) {
+            const syncPayload = prepareSyncPayload(computed);
+            await syncSummaryToGoogleSheet(syncPayload);
+            setShowSyncSuccess(true);
+            setHasAutoSynced(true);
+            setTimeout(() => setShowSyncSuccess(false), 5000);
+          }
+        } catch (err) {
+          console.error("Background sync failed", err);
+        }
+      };
+
+      // Slight delay to ensure data is settled after initial load
+      const timer = setTimeout(runSync, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [isLoading, data, rawSources, hasAutoSynced]);
 
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(20);
@@ -619,6 +648,38 @@ function App() {
             isOpen={updateGuideOpen}
             onClose={() => setUpdateGuideOpen(false)}
           />
+        </div>
+      )}
+      {/* Auto-Sync Success Toast */}
+      {showSyncSuccess && (
+        <div style={{
+          position: 'fixed', bottom: '30px', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 9999, animation: 'sync-toast-in 0.5s cubic-bezier(0.18, 0.89, 0.32, 1.28) both'
+        }}>
+          <div style={{
+            background: 'rgba(25, 135, 84, 0.95)', backdropFilter: 'blur(10px)',
+            padding: '16px 28px', borderRadius: '16px', color: '#fff',
+            display: 'flex', alignItems: 'center', gap: '15px',
+            boxShadow: '0 15px 35px rgba(0,0,0,0.2), 0 5px 15px rgba(25, 135, 84, 0.3)',
+            border: '1px solid rgba(255,255,255,0.2)'
+          }}>
+            <div style={{
+              width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(255,255,255,0.2)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>
+              <i className="fas fa-check" style={{ fontSize: '16px' }}></i>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={{ fontWeight: 700, fontSize: '15px', letterSpacing: '0.3px' }}>Auto-Sync สำเร็จ!</span>
+              <span style={{ fontSize: '12px', opacity: 0.9 }}>ข้อมูลสรุปถูกอัปเดตไปยัง Google Sheet เรียบร้อยแล้ว</span>
+            </div>
+          </div>
+          <style>{`
+            @keyframes sync-toast-in {
+              from { transform: translate(-50%, 100px); opacity: 0; }
+              to { transform: translate(-50%, 0); opacity: 1; }
+            }
+          `}</style>
         </div>
       )}
     </>
