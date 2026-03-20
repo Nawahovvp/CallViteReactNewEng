@@ -107,54 +107,11 @@ export function useAppData() {
     }, [applyData]);
 
     useEffect(() => {
-        let cancelled = false;
-
-        const init = async () => {
-            let cacheHit = false;
-
-            // Phase 1: Try to load from IndexedDB cache first (near-instant)
-            if (!hasCacheLoaded.current) {
-                hasCacheLoaded.current = true;
-                try {
-                    const cached = await loadAllFromCache();
-                    const hasCache = cached.poData || cached.prData || cached.engData || cached.plantStockData;
-
-                    if (hasCache && !cancelled) {
-                        cacheHit = true;
-                        console.log('[Cache] Showing cached data instantly while fetching fresh data...');
-                        const cachedResult = {
-                            mainData: [],
-                            requestData: [],
-                            poData: cached.poData || [],
-                            prData: cached.prData || [],
-                            mainSapData: [],
-                            vipaData: [],
-                            nawaData: [],
-                            plantStockData: cached.plantStockData || [],
-                            newPartData: [],
-                            projectData: [],
-                            updateData: [],
-                            teamPlantData: [],
-                            engData: cached.engData || []
-                        };
-                        applyData(cachedResult, false);
-                        setIsLoading(false);
-                    }
-                } catch (e) {
-                    console.warn('[Cache] Cache load failed:', e);
-                }
-            }
-
-            // Phase 2: Always fetch fresh data from server
-            if (!cancelled) {
-                fetchData(!cacheHit);
-            }
-        };
-
-        init();
+        // Always show spinner and fetch fresh data from server
+        fetchData(true);
         const interval = setInterval(() => fetchData(false), 5 * 60 * 1000);
-        return () => { cancelled = true; clearInterval(interval); };
-    }, [fetchData, applyData]);
+        return () => clearInterval(interval);
+    }, [fetchData]);
 
     // --- Filtering Logic (matching original call.js exactly) ---
 
