@@ -245,7 +245,6 @@ function App() {
   const handleStatusEditSaved = (actionType, ticket, material, newStatus) => {
     console.log(`Status ${actionType}: Ticket=${ticket}, Material=${material}, Status=${newStatus}`);
     if (actionType === 'delete') {
-      // Find the row and optimistically restore its fallback TempStatusX
       const targetRow = allData.find(r =>
         String(r["Ticket Number"]).trim() === String(ticket).trim() &&
         String(r["Material"]).trim() === String(material).trim()
@@ -253,26 +252,27 @@ function App() {
       const fallbackStatus = targetRow?.TempStatusX || "รอของเข้า";
       console.log(`Fallback optimistic to: ${fallbackStatus}`);
       updateRowLocally(ticket, material, { StatusX: fallbackStatus, StatusCall: fallbackStatus, _highlight: 'delete', _highlightKey: Date.now() });
-      refreshDataBackground();
     } else {
       updateRowLocally(ticket, material, { StatusX: newStatus, StatusCall: newStatus, _highlight: 'update', _highlightKey: Date.now() });
-      refreshDataBackground(); // background refresh
     }
+    // Immediate background refresh + delayed re-fetch to ensure GAS has processed the write
+    refreshDataBackground();
+    setTimeout(() => refreshDataBackground(), 5000);
   };
 
   // After project save, refresh data optimistically
   const handleSpacialSaved = (actionType, ticket, statusCall, project) => {
     console.log(`SPACIAL ${actionType}: Ticket=${ticket}, StatusCall=${statusCall}, Project=${project}`);
     if (actionType === 'delete') {
-      // Optimistically restore group ticket status fallback by checking first item
       const targetRow = allData.find(r => String(r["Ticket Number"]).trim() === String(ticket).trim());
       const fallbackStatus = targetRow?.TempStatusX || "รอของเข้า";
       updateRowLocally(ticket, null, { StatusCall: fallbackStatus, Answer1: "-", _highlight: 'delete', _highlightKey: Date.now() });
-      refreshDataBackground();
     } else {
       updateRowLocally(ticket, null, { StatusCall: statusCall, Answer1: project, _highlight: 'update', _highlightKey: Date.now() });
-      refreshDataBackground(); // background refresh
     }
+    // Immediate background refresh + delayed re-fetch to ensure GAS has processed the write
+    refreshDataBackground();
+    setTimeout(() => refreshDataBackground(), 5000);
   };
 
   // Simple routing logic
