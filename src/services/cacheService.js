@@ -8,7 +8,11 @@ const DB_VERSION = 1;
 const STORE_NAME = 'dataCache';
 const DEFAULT_MAX_AGE = 30 * 60 * 1000; // 30 minutes
 
-export const CACHEABLE_KEYS = ['poData', 'prData', 'engData', 'plantStockData'];
+export const CACHEABLE_KEYS = [
+    'mainData', 'requestData', 'poData', 'prData', 'mainSapData', 
+    'vipaData', 'nawaData', 'plantStockData', 'newPartData', 
+    'projectData', 'updateData', 'teamPlantData', 'engData'
+];
 
 // --- IndexedDB helpers ---
 

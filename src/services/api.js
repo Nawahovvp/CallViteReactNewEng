@@ -133,6 +133,17 @@ export async function loginUser(username, password) {
     return user;
 }
 
+async function runInBatches(tasks, batchSize) {
+    const results = [];
+    for (let i = 0; i < tasks.length; i += batchSize) {
+        const batch = tasks.slice(i, i + batchSize).map(task => task());
+        const batchResults = await Promise.allSettled(batch);
+        results.push(...batchResults);
+        if (i + batchSize < tasks.length) await new Promise(r => setTimeout(r, 100)); // Small delay to stagger
+    }
+    return results;
+}
+
 // Fetch All Parallel
 export async function fetchAllData() {
     // 10 concurrent requests
@@ -169,19 +180,7 @@ export async function fetchAllData() {
         )
     ];
 
-    // Batch to not starve connections
-    async function runInBatches(tasks, batchSize) {
-        const results = [];
-        for (let i = 0; i < tasks.length; i += batchSize) {
-            const batch = tasks.slice(i, i + batchSize).map(task => task());
-            const batchResults = await Promise.allSettled(batch);
-            results.push(...batchResults);
-            if (i + batchSize < tasks.length) await new Promise(r => setTimeout(r, 200)); // Shorter delay
-        }
-        return results;
-    }
-
-    const results = await runInBatches(fetchTasks, 4); // Increased batch size slightly
+    const results = await runInBatches(fetchTasks, 6); // Optimal batch size for stability
 
     const safeResult = (idx, name) => {
         if (results[idx] && results[idx].status === 'fulfilled') {

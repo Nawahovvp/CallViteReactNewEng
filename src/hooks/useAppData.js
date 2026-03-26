@@ -24,20 +24,13 @@ export function useAppData() {
     // Process fetched data (shared between cache load and server load)
     const applyData = useCallback((fetchResult, saveCache = false) => {
         const {
-            mainData,
-            requestData,
-            poData,
-            prData,
-            mainSapData,
-            vipaData,
-            nawaData,
-            plantStockData,
-            newPartData,
-            projectData,
-            updateData,
-            teamPlantData,
-            engData
+            mainData, requestData, poData, prData, mainSapData,
+            vipaData, nawaData, plantStockData, newPartData,
+            projectData, updateData, teamPlantData, engData
         } = fetchResult;
+
+        // Skip processing if essential data is missing (e.g., empty cache)
+        if (!mainData || mainData.length === 0) return false;
 
         const now = new Date();
         let latestUpdateStr = now.toLocaleString('th-TH');
@@ -67,29 +60,25 @@ export function useAppData() {
         setLastUpdated(latestUpdateStr);
 
         const processed = processRawData(
-            mainData,
-            requestData,
-            poData,
-            prData,
-            mainSapData,
-            vipaData,
-            nawaData,
-            plantStockData,
-            newPartData,
-            projectData,
-            teamPlantData,
-            engData
+            mainData, requestData, poData, prData, mainSapData,
+            vipaData, nawaData, plantStockData, newPartData,
+            projectData, teamPlantData, engData
         );
         setProcessedData(processed);
         setRawSources({ nawaRawData: nawaData, poRawData: poData, prRawData: prData, plantStockData: plantStockData, engData: engData });
 
-        // Save cacheable sources to localStorage for instant load next time
+        // Save ALL sources to cache for instant load next time
         if (saveCache) {
-            saveAllToCache({ poData, prData, engData, plantStockData });
+            saveAllToCache({ 
+                mainData, requestData, poData, prData, mainSapData, 
+                vipaData, nawaData, plantStockData, newPartData, 
+                projectData, updateData, teamPlantData, engData 
+            });
         }
 
         localStorage.removeItem('app_cached_requestQuantities');
         localStorage.removeItem('app_cached_requestByPlant');
+        return true;
     }, []);
 
     const fetchData = useCallback(async (showLoading = true) => {
@@ -106,12 +95,36 @@ export function useAppData() {
         }
     }, [applyData]);
 
+    // Cache-first initialization
     useEffect(() => {
-        // Always show spinner and fetch fresh data from server
-        fetchData(true);
+        const initData = async () => {
+            if (hasCacheLoaded.current) return;
+            hasCacheLoaded.current = true;
+
+            try {
+                // 1. Try to load from IndexedDB cache first
+                const cachedData = await loadAllFromCache();
+                const hasAppliedCache = applyData(cachedData, false);
+                
+                if (hasAppliedCache) {
+                    console.log("[Cache-First] UI populated from cache, fetching fresh in background...");
+                    setIsLoading(false); // Hide spinner early if we have cached data
+                    fetchData(false);    // Background refresh
+                } else {
+                    console.log("[Cache-First] No valid cache found, performing initial server fetch...");
+                    fetchData(true);     // Initial server fetch with spinner
+                }
+            } catch (err) {
+                console.warn("[Cache-First] Failed to initialize from cache:", err);
+                fetchData(true);
+            }
+        };
+
+        initData();
+
         const interval = setInterval(() => fetchData(false), 5 * 60 * 1000);
         return () => clearInterval(interval);
-    }, [fetchData]);
+    }, [fetchData, applyData]);
 
     // --- Filtering Logic (matching original call.js exactly) ---
 
